@@ -1303,6 +1303,11 @@ class FABulous_CLI(Cmd):
         help="Optimize the GDS layout",
         type=Path,
     )
+    gds_parser.add_argument(
+        "--debug",
+        help="resume flow using existing run",
+        action="store_true",
+    )
 
     io_pin_config_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
     io_pin_config_parser.add_argument(
@@ -1389,6 +1394,7 @@ class FABulous_CLI(Cmd):
             tile_dir / "macro",
             cast("str", get_context().pdk),
             cast("Path", get_context().pdk_root),
+            debug=args.debug,
             optimisation=args.optimise,
             base_config_path=self.projectDir / "Tile" / "include" / "gds_config.yaml",
             config_override_path=tile_dir / "gds_config.yaml",

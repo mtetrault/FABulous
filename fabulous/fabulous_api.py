@@ -502,6 +502,7 @@ class FABulous_API:
         pdk: str,
         pdk_root: Path,
         *,
+        debug=False,
         final_view: Path | None = None,
         optimisation: OptMode = OptMode.BALANCE,
         base_config_path: Path | None = None,
@@ -522,7 +523,13 @@ class FABulous_API:
             override_config_path=config_override_path,
             **custom_config_overrides or {},
         )
-        result = flow.start()
+
+
+        if debug:
+            result = flow.start(last_run=True)
+        else:
+            result = flow.start()
+
         if final_view:
             logger.info(f"Saving final view to {final_view}")
             result.save_snapshot(final_view)
