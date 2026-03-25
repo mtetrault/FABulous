@@ -143,7 +143,7 @@ def harden_tile(tiles_path, tile_name, verilog_files, width, height, openOpenroa
 
         # Sources
         "VERILOG_FILES": verilog_files,
-        "TILE_PATH": tile_path,
+        #"TILE_PATH": tile_path,
 
         # CTS
         "CLOCK_PORT": "UserCLK",
@@ -177,13 +177,13 @@ def harden_tile(tiles_path, tile_name, verilog_files, width, height, openOpenroa
         # Run the flow
     flow = flow_class(
         flow_cfg,
-        design_dir=tile_path,
+        design_dir=tile_path+"/macro"+"/no_opt",
         pdk_root=PDK_ROOT,
         pdk=PDK,
         #scl=SCL
     )
 
-    flow.start(last_run=true)
+    flow.start(last_run=True)
 
 
 def main():
