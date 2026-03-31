@@ -90,7 +90,12 @@ class CustomizedTileMacroFlow(FABulousTileVerilogMacroFlow):
             OpenROAD.FillInsertion,
             Odb.CellFrequencyTables,
             OpenROAD.RCX,
-            OpenROAD.IRDropReport,
+            #OpenROAD.IRDropReport,
+        ]
+        + [Innovus.DrcBasic,
+           Innovus.ConnectivityCheck,
+           Innovus.StreamOut,
+           Innovus.LefOut,
         ]
         #+ write_out_steps
         #+ check_steps
