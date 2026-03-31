@@ -1423,6 +1423,11 @@ class FABulous_CLI(Cmd):
         const=OptMode.BALANCE,
         nargs="?",
     )
+    gen_all_tile_parser.add_argument(
+        "--customflow",
+        help="use custom flow, derived from FABulous builder",
+        action="store_true",
+    )
 
     @with_argparser(gen_all_tile_parser)
     @with_category(CMD_FABRIC_FLOW)
@@ -1430,12 +1435,22 @@ class FABulous_CLI(Cmd):
         """Generate GDSII files for all tiles in the fabric."""
         commands = CommandPipeline(self)
         for i in sorted(self.allTile):
+            # basic command
+            buildCommand = f"gen_tile_macro {i}"
+
+            # add optimisation flag
             if args.optimise:
-                commands.add_step(
-                    f"gen_tile_macro {i} --optimise {args.optimise.value}"
-                )
-            else:
-                commands.add_step(f"gen_tile_macro {i}")
+                buildCommand += f" --optimise {args.optimise.value}"
+                #commands.add_step(
+                #    f"gen_tile_macro {i} --optimise {args.optimise.value}"
+                #)
+            # add customflow flag
+            if args.customflow:
+                buildCommand += f" --customflow"
+
+            commands.add_step(buildCommand)
+
+
         if not args.parallel:
             commands.execute()
         else:
