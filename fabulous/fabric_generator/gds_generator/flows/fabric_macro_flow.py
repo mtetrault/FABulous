@@ -62,6 +62,7 @@ configs = Classic.config_vars + [
     ),
 ]
 
+from fabulous.fabric_generator.gds_generator.steps import innovus as Innovus
 
 @Flow.factory.register()
 class FABulousFabricMacroFlow(Classic):
@@ -75,7 +76,8 @@ class FABulousFabricMacroFlow(Classic):
     tile_sizes: dict[str, tuple[Decimal, Decimal]]
     fabric: Fabric
 
-    Steps = prep_steps + physical_steps + write_out_steps + check_steps
+    #Steps = prep_steps + physical_steps + write_out_steps + check_steps
+    Steps = prep_steps + physical_steps + [Innovus.DrcBasic, Innovus.ConnectivityCheck, Innovus.StreamOut, Innovus.LefOut,]
     Substitutions = subs
     config_vars = configs
 
@@ -154,7 +156,7 @@ class FABulousFabricMacroFlow(Classic):
             name=self.fabric.name,
             design_dir=final_design_dir,
             pdk=pdk,
-            pdk_root=str(pdk_root.resolve().parent),
+            pdk_root=str(pdk_root.resolve()),
         )
 
     def _compute_row_and_column_sizes(
