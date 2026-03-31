@@ -1308,6 +1308,11 @@ class FABulous_CLI(Cmd):
         help="resume flow using existing run",
         action="store_true",
     )
+    gds_parser.add_argument(
+        "--customflow",
+        help="use custom flow, derived from FABulous builder",
+        action="store_true",
+    )
 
     io_pin_config_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
     io_pin_config_parser.add_argument(
@@ -1395,6 +1400,7 @@ class FABulous_CLI(Cmd):
             cast("str", get_context().pdk),
             cast("Path", get_context().pdk_root),
             debug=args.debug,
+            customflow=args.customflow,
             optimisation=args.optimise,
             base_config_path=self.projectDir / "Tile" / "include" / "gds_config.yaml",
             config_override_path=tile_dir / "gds_config.yaml",

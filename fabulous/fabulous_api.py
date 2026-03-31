@@ -503,6 +503,7 @@ class FABulous_API:
         pdk_root: Path,
         *,
         debug=False,
+        customflow=False,
         final_view: Path | None = None,
         optimisation: OptMode = OptMode.BALANCE,
         base_config_path: Path | None = None,
@@ -513,7 +514,14 @@ class FABulous_API:
         logger.info(f"PDK root: {pdk_root}")
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
-        flow = FABulousTileVerilogMacroFlow(
+
+        if customflow:
+            from fabulous.fabric_generator.gds_generator.flows import hybridflow as HybridFlow
+            flow_class = HybridFlow.CustomizedTileMacroFlow
+        else:
+            flow_class = FABulousTileVerilogMacroFlow
+
+        flow = flow_class(
             self.fabric.getTileByName(tile_dir.name),
             io_pin_config,
             optimisation,
