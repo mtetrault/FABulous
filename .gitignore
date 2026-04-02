@@ -20,3 +20,4 @@ docs/source/generated_doc/
 fabulous/fabric_generator/gds_generator/script/innovus
 
 fabulous/fabric_generator/gds_generator/steps/innovus.py
+fabulous/fabric_generator/gds_generator/steps/calibre.py
