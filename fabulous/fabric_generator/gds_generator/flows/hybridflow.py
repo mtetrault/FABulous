@@ -45,6 +45,7 @@ from fabulous.fabric_generator.gds_generator.flows.tile_macro_flow import (
 )
 
 from fabulous.fabric_generator.gds_generator.steps import innovus as Innovus
+from fabulous.fabric_generator.gds_generator.steps import calibre as Calibre
 
 
 subs = {
@@ -92,9 +93,11 @@ class CustomizedTileMacroFlow(FABulousTileVerilogMacroFlow):
             OpenROAD.RCX,
             #OpenROAD.IRDropReport,
         ]
-        + [Innovus.DrcBasic,
+        + [
+           Innovus.DrcBasic,
            Innovus.ConnectivityCheck,
            Innovus.StreamOut,
+           Calibre.DrcSignoff,
            Innovus.LefOut,
         ]
         #+ write_out_steps
