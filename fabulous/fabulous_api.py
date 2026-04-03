@@ -54,6 +54,8 @@ from fabulous.fabric_generator.gen_fabric.gen_top_wrapper import generateTopWrap
 from fabulous.fabulous_settings import get_context
 from fabulous.geometry_generator.geometry_gen import GeometryGenerator
 
+from librelane.flows.sequential import SequentialFlow
+
 
 class FABulous_API:
     """Class for managing fabric and geometry generation.
@@ -515,11 +517,13 @@ class FABulous_API:
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
 
-        if customflow:
-            from fabulous.fabric_generator.gds_generator.flows import hybridflow as HybridFlow
-            flow_class = HybridFlow.CustomizedTileMacroFlow
-        else:
-            flow_class = FABulousTileVerilogMacroFlow
+        #if customflow:
+        #    from fabulous.fabric_generator.gds_generator.flows import hybridflow as HybridFlow
+        #    flow_class = HybridFlow.CustomizedTileMacroFlow
+        #else:
+        #    flow_class = FABulousTileVerilogMacroFlow
+
+        flow_class = self.SelectFlow(FABulousTileVerilogMacroFlow)
 
         flow = flow_class(
             self.fabric.getTileByName(tile_dir.name),
@@ -644,3 +648,21 @@ class FABulous_API:
         logger.info(f"Saving final views for FABulous to {out_folder / 'final_views'}")
         result.save_snapshot(out_folder / "final_views")
         logger.info("Stitching flow completed.")
+
+    def SelectFlow(self, classtype) -> SequentialFlow:
+        try:
+            # import user module; can be installed with "pip install -e /path/to/package"
+            import fabulous.extendfabulous.userflow as FabulousUserFlow
+            flow_class = FabulousUserFlow.SelectUserFlow(classtype)
+
+        except ModuleNotFoundError:
+            print("Falling back to default FABulous flow")
+            flow_class = classtype
+
+        # double check flow type
+        print(flow_class)
+        print(classtype)
+
+        print( isinstance(flow_class, classtype))
+        assert isinstance(flow_class, classtype)
+        return flow_class
