@@ -1,5 +1,7 @@
 """Defines the standard flow for generating GDS from RTL."""
 
+from loguru import logger
+
 from librelane.steps import checker as Checker
 from librelane.steps import klayout as KLayout
 from librelane.steps import magic as Magic
@@ -10,6 +12,7 @@ from librelane.steps import openroad as OpenROAD
 from librelane.steps import pyosys as pyYosys
 from librelane.steps import verilator as Verilator
 from librelane.steps.step import Step
+from librelane.flows.sequential import SequentialFlow
 
 from fabulous.fabric_generator.gds_generator.steps.condition_magic_drc import (
     ConditionalMagicDRC,
@@ -152,3 +155,17 @@ classic_gating_config_vars: dict[str, list[str]] = {
         "RUN_LINTER",
     ],
 }
+
+
+def SelectFlow(classtype) -> SequentialFlow:
+    try:
+        # import user module; can be installed with "pip install -e /path/to/package"
+        import fabulous.extendfabulous.userflow as FabulousUserFlow
+        flow_class = FabulousUserFlow.SelectUserFlow(classtype)
+        logger.info("User defined FABulous flow")
+
+    except ModuleNotFoundError:
+        logger.info("Default FABulous flow")
+        flow_class = classtype
+
+    return flow_class
