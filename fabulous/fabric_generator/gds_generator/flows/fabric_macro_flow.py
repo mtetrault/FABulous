@@ -76,8 +76,7 @@ class FABulousFabricMacroFlow(Classic):
     tile_sizes: dict[str, tuple[Decimal, Decimal]]
     fabric: Fabric
 
-    #Steps = prep_steps + physical_steps + write_out_steps + check_steps
-    Steps = prep_steps + physical_steps + [Innovus.DrcBasic, Innovus.ConnectivityCheck, Innovus.StreamOut, Innovus.LefOut,]
+    Steps = prep_steps + physical_steps + write_out_steps + check_steps
     Substitutions = subs
     config_vars = configs
 
