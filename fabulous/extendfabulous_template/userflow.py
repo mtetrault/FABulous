@@ -1,4 +1,14 @@
+"""
+To use this example, create a symbolic link in the "fabulous" folder with
+"extendfabulous" as link name.
 
+For a custom flow, copy the template elsewhere and similarly create a symbolic link
+in the "fabulous" folder.
+
+Alternatively, the extendfabulous python module could be added through
+the "pip install -e {module location}" command, where the SelectFlow would
+however need to be modified.
+"""
 
 
 from librelane.flows.flow import Flow
