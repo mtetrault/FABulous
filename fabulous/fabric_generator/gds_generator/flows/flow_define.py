@@ -1,5 +1,7 @@
 """Defines the standard flow for generating GDS from RTL."""
 
+from loguru import logger
+
 from librelane.steps import checker as Checker
 from librelane.steps import klayout as KLayout
 from librelane.steps import magic as Magic
@@ -160,15 +162,10 @@ def SelectFlow(classtype) -> SequentialFlow:
         # import user module; can be installed with "pip install -e /path/to/package"
         import fabulous.extendfabulous.userflow as FabulousUserFlow
         flow_class = FabulousUserFlow.SelectUserFlow(classtype)
+        logger.info("User defined FABulous flow")
 
     except ModuleNotFoundError:
-        print("Falling back to default FABulous flow")
+        logger.info("Default FABulous flow")
         flow_class = classtype
 
-    # double check flow type
-    print(flow_class)
-    print(classtype)
-
-    print(isinstance(flow_class, classtype))
-    assert isinstance(flow_class, classtype)
     return flow_class
