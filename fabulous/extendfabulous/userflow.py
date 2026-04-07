@@ -44,29 +44,38 @@ from fabulous.fabric_generator.gds_generator.flows.tile_macro_flow import (
     FABulousTileVerilogMacroFlow,
 )
 
+from fabulous.fabric_generator.gds_generator.flows.fabric_macro_flow import (
+    FABulousFabricMacroFlow,
+)
+
 
 
 def SelectUserFlow(classtype) -> SequentialFlow | None:
 
     print(classtype)
-    if(isinstance(classtype, FABulousTileVerilogMacroFlow)):
+    if(classtype ==FABulousTileVerilogMacroFlow):
         print("found match")
         return CustomizedTileMacroFlow
 
-    print("no match")
+
+    if(classtype ==FABulousFabricMacroFlow):
+        print("found match")
+        return CustomizedFabricMacroFlow
+
+    print("no match, returning default flow")
     return classtype
 
 
+# example user flow modification/override
 @Flow.factory.register()
 class CustomizedTileMacroFlow(FABulousTileVerilogMacroFlow):
-    """A tile optimisation flow for FABulous fabric generation from Verilog."""
-
+    # Only steps modified here
     Steps = (
         prep_steps
         + [
             TileOptimisation,
             OpenROAD.FillInsertion,
-            #Odb.CellFrequencyTables,
+            Odb.CellFrequencyTables,
             #OpenROAD.RCX,
             #OpenROAD.IRDropReport,
         ]
@@ -74,6 +83,10 @@ class CustomizedTileMacroFlow(FABulousTileVerilogMacroFlow):
         #+ check_steps
     )
 
-    config_vars = Classic.config_vars
-
-    gating_config_vars = classic_gating_config_vars
+# example user flow modification/override
+@Flow.factory.register()
+class CustomizedFabricMacroFlow(FABulousFabricMacroFlow):
+    """A tile optimisation flow for FABulous fabric generation from Verilog."""
+    # Only steps modified here
+    #Steps = prep_steps + physical_steps + write_out_steps + check_steps
+    Steps = prep_steps + physical_steps + write_out_steps

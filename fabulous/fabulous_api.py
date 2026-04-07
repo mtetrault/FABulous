@@ -34,6 +34,9 @@ from fabulous.fabric_generator.gds_generator.flows.full_fabric_flow import (
 from fabulous.fabric_generator.gds_generator.flows.tile_macro_flow import (
     FABulousTileVerilogMacroFlow,
 )
+from fabulous.fabric_generator.gds_generator.flows.flow_define import (
+    SelectFlow,
+)
 from fabulous.fabric_generator.gds_generator.gen_io_pin_config_yaml import (
     generate_IO_pin_order_config,
 )
@@ -54,7 +57,7 @@ from fabulous.fabric_generator.gen_fabric.gen_top_wrapper import generateTopWrap
 from fabulous.fabulous_settings import get_context
 from fabulous.geometry_generator.geometry_gen import GeometryGenerator
 
-from librelane.flows.sequential import SequentialFlow
+
 
 
 class FABulous_API:
@@ -517,13 +520,7 @@ class FABulous_API:
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
 
-        #if customflow:
-        #    from fabulous.fabric_generator.gds_generator.flows import hybridflow as HybridFlow
-        #    flow_class = HybridFlow.CustomizedTileMacroFlow
-        #else:
-        #    flow_class = FABulousTileVerilogMacroFlow
-
-        flow_class = self.SelectFlow(FABulousTileVerilogMacroFlow)
+        flow_class = SelectFlow(FABulousTileVerilogMacroFlow)
 
         flow = flow_class(
             self.fabric.getTileByName(tile_dir.name),
@@ -589,7 +586,10 @@ class FABulous_API:
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
 
-        flow = FABulousFabricMacroFlow(
+
+        flow_class = SelectFlow(FABulousFabricMacroFlow)
+
+        flow = flow_class(
             fabric=self.fabric,
             fabric_verilog_paths=[fabric_path],
             tile_macro_dirs=tile_macro_paths,
@@ -637,7 +637,11 @@ class FABulous_API:
             final_config_args["TILE_OPT_INFO"] = str(tile_opt_config)
         if config_overrides:
             final_config_args.update(config_overrides)
-        flow = FABulousFabricMacroFullFlow(
+
+
+        flow_class = SelectFlow(FABulousFabricMacroFullFlow)
+
+        flow = flow_class(
             final_config_args,
             name=self.fabric.name,
             design_dir=str(out_folder.resolve()),
@@ -649,20 +653,4 @@ class FABulous_API:
         result.save_snapshot(out_folder / "final_views")
         logger.info("Stitching flow completed.")
 
-    def SelectFlow(self, classtype) -> SequentialFlow:
-        try:
-            # import user module; can be installed with "pip install -e /path/to/package"
-            import fabulous.extendfabulous.userflow as FabulousUserFlow
-            flow_class = FabulousUserFlow.SelectUserFlow(classtype)
 
-        except ModuleNotFoundError:
-            print("Falling back to default FABulous flow")
-            flow_class = classtype
-
-        # double check flow type
-        print(flow_class)
-        print(classtype)
-
-        print( isinstance(flow_class, classtype))
-        assert isinstance(flow_class, classtype)
-        return flow_class
