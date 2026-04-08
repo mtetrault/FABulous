@@ -34,6 +34,9 @@ from fabulous.fabric_generator.gds_generator.flows.fabric_macro_flow import (
 from fabulous.fabric_generator.gds_generator.flows.tile_macro_flow import (
     FABulousTileVerilogMacroFlow,
 )
+from fabulous.fabric_generator.gds_generator.flows.flow_define import (
+    SelectFlow,
+)
 from fabulous.fabric_generator.gds_generator.gen_io_pin_config_yaml import (
     generate_IO_pin_order_config,
 )
@@ -101,12 +104,13 @@ def _run_tile_flow_worker(
 
         context: FABulousSettings = init_context(project_dir=proj_dir)
         # Reconstruct the flow in the worker process with serializable data
-        flow: FABulousTileVerilogMacroFlow = FABulousTileVerilogMacroFlow(
+        flow_class = SelectFlow(FABulousTileVerilogMacroFlow)
+        flow: flow_class = flow_class(
             tile_type,
             io_pin_config,
             optimisation,
             pdk=context.pdk,
-            pdk_root=context.pdk_root.parent,
+            pdk_root=context.pdk_root,
             base_config_path=base_config_path,
             override_config_path=override_config_path,
             **custom_config_overrides or {},
@@ -461,7 +465,8 @@ class FABulousFabricMacroFullFlow(Flow):
         # Step 5: Run fabric stitching
         self.progress_bar.start_stage("Fabric Stitching")
 
-        stitching_flow: FABulousFabricMacroFlow = FABulousFabricMacroFlow(
+        flow_class = SelectFlow(FABulousFabricMacroFlow)
+        stitching_flow: flow_class = flow_class(
             fabric,
             fabric_verilog_paths=[proj_dir / "Fabric" / f"{fabric.name}.v"],
             tile_macro_dirs={

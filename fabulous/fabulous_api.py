@@ -34,6 +34,9 @@ from fabulous.fabric_generator.gds_generator.flows.full_fabric_flow import (
 from fabulous.fabric_generator.gds_generator.flows.tile_macro_flow import (
     FABulousTileVerilogMacroFlow,
 )
+from fabulous.fabric_generator.gds_generator.flows.flow_define import (
+    SelectFlow,
+)
 from fabulous.fabric_generator.gds_generator.gen_io_pin_config_yaml import (
     generate_IO_pin_order_config,
 )
@@ -53,6 +56,8 @@ from fabulous.fabric_generator.gen_fabric.gen_tile import (
 from fabulous.fabric_generator.gen_fabric.gen_top_wrapper import generateTopWrapper
 from fabulous.fabulous_settings import get_context
 from fabulous.geometry_generator.geometry_gen import GeometryGenerator
+
+
 
 
 class FABulous_API:
@@ -515,11 +520,7 @@ class FABulous_API:
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
 
-        if customflow:
-            from fabulous.fabric_generator.gds_generator.flows import hybridflow as HybridFlow
-            flow_class = HybridFlow.CustomizedTileMacroFlow
-        else:
-            flow_class = FABulousTileVerilogMacroFlow
+        flow_class = SelectFlow(FABulousTileVerilogMacroFlow)
 
         flow = flow_class(
             self.fabric.getTileByName(tile_dir.name),
@@ -585,7 +586,10 @@ class FABulous_API:
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
 
-        flow = FABulousFabricMacroFlow(
+
+        flow_class = SelectFlow(FABulousFabricMacroFlow)
+
+        flow = flow_class(
             fabric=self.fabric,
             fabric_verilog_paths=[fabric_path],
             tile_macro_dirs=tile_macro_paths,
@@ -633,14 +637,20 @@ class FABulous_API:
             final_config_args["TILE_OPT_INFO"] = str(tile_opt_config)
         if config_overrides:
             final_config_args.update(config_overrides)
-        flow = FABulousFabricMacroFullFlow(
+
+
+        flow_class = SelectFlow(FABulousFabricMacroFullFlow)
+
+        flow = flow_class(
             final_config_args,
             name=self.fabric.name,
             design_dir=str(out_folder.resolve()),
             pdk=pdk,
-            pdk_root=str((pdk_root).resolve().parent),
+            pdk_root=str(pdk_root.resolve()),
         )
         result = flow.start()
         logger.info(f"Saving final views for FABulous to {out_folder / 'final_views'}")
         result.save_snapshot(out_folder / "final_views")
         logger.info("Stitching flow completed.")
+
+
