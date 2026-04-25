@@ -50,19 +50,19 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
             net.setSigType(net_type)
             info(f"Created {net_name} with type {net_type}")
 
-    VDD_net = reader.block.findNet(current_vdd_net)
+    vpwr_net = reader.block.findNet(current_vdd_net)
     vgnd_net = reader.block.findNet(current_gnd_net)
 
     # Create wires
-    VDD_wire = odb.dbSWire.create(VDD_net, "ROUTED")
+    vpwr_wire = odb.dbSWire.create(vpwr_net, "ROUTED")
     vgnd_wire = odb.dbSWire.create(vgnd_net, "ROUTED")
 
     # Create bterms (top-level)
-    VDD_bterm = odb.dbBTerm.create(VDD_net, current_vdd_net)
-    VDD_bterm.setIoType("INOUT")
-    VDD_bterm.setSigType(VDD_net.getSigType())
-    VDD_bterm.setSpecial()
-    VDD_bpin = odb.dbBPin_create(VDD_bterm)
+    vpwr_bterm = odb.dbBTerm.create(vpwr_net, current_vdd_net)
+    vpwr_bterm.setIoType("INOUT")
+    vpwr_bterm.setSigType(vpwr_net.getSigType())
+    vpwr_bterm.setSpecial()
+    vpwr_bpin = odb.dbBPin_create(vpwr_bterm)
 
     vgnd_bterm = odb.dbBTerm.create(vgnd_net, current_gnd_net)
     vgnd_bterm.setIoType("INOUT")
@@ -71,7 +71,7 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
     vgnd_bpin = odb.dbBPin_create(vgnd_bterm)
 
     # until odb.dbSigType.POWER/GROUND are exposed
-    POWER  = VDD_net.getSigType()
+    POWER  = vpwr_net.getSigType()
     GROUND = vgnd_net.getSigType()
 
 
@@ -108,7 +108,7 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
 
                         if master_mterm.getSigType() == POWER:
                             odb.dbSBox_create(
-                                VDD_wire,
+                                vpwr_wire,
                                 metal_layer,
                                 blk_inst.getLocation()[0] + mpins_dbox.xMin(),
                                 blk_inst.getLocation()[1] + mpins_dbox.yMin(),
@@ -117,7 +117,7 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
                                 "STRIPE",
                             )
                             odb.dbBox_create(
-                                VDD_bpin,
+                                vpwr_bpin,
                                 metal_layer,
                                 blk_inst.getLocation()[0] + mpins_dbox.xMin(),
                                 blk_inst.getLocation()[1] + mpins_dbox.yMin(),
@@ -144,7 +144,7 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
                                 blk_inst.getLocation()[1] + mpins_dbox.yMax(),
                             )
 
-    VDD_bpin.setPlacementStatus("FIRM")
+    vpwr_bpin.setPlacementStatus("FIRM")
     vgnd_bpin.setPlacementStatus("FIRM")
 
 
