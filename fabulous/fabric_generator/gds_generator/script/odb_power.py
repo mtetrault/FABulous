@@ -40,7 +40,7 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
     """Connect power rails for the tiles using a custom script."""
 
     # Create nets, if they don't exist yet
-    # todo: review: is this part needed? If no macro has these power nets, no connection will be created.
+    # todo: review: is this part needed? Or error if these nets don't exist at this stage?
     for net_name, net_type in [(current_vdd_net, "POWER"), (current_gnd_net, "GROUND")]:
         net = reader.block.findNet(net_name)
         if net is None:
@@ -83,12 +83,10 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
             iterm_name = iterm.getMTerm().getName()
             iterm_sigtype = iterm.getMTerm().getSigType()
 
-            #if iterm_sigtype == POWER:
             if iterm_name == current_vdd_net and iterm_sigtype == POWER:
                 info(f"Connecting {iterm_name} of type {iterm_sigtype}")
-                iterm.connect(VDD_net)
+                iterm.connect(vpwr_net)
 
-            #if iterm_sigtype == GROUND:
             if iterm_name == current_gnd_net and iterm_sigtype == GROUND:
                 info(f"Connecting {iterm_name} of type {iterm_sigtype}")
                 iterm.connect(vgnd_net)
@@ -98,9 +96,9 @@ def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
         # Now, for each power/ground mterm
         # Copy the geomtry of the pins to wires and top-level pins
         for master_mterm in inst_master.getMTerms():
-            if ((master_mterm.getSigType() == POWER or master_mterm.getSigType() == GROUND)
+            if( (master_mterm.getName() == current_vdd_net or master_mterm.getName() == current_gnd_net)
                 and
-                (master_mterm.getName() == current_vdd_net or master_mterm.getName() == current_gnd_net)):
+                (master_mterm.getSigType() == POWER or master_mterm.getSigType() == GROUND)):
                 for mterm_mpins in master_mterm.getMPins():
                     for mpins_dbox in mterm_mpins.getGeometry():
 
