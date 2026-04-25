@@ -40,9 +40,15 @@ class FABulousPDN(OdbpyStep):
     def run(self, state_in: State, **kwargs) -> Tuple[ViewsUpdate, MetricsUpdate]:
         kwargs, env = self.extract_env(kwargs)
 
-        # todo: add default value if empty or non-existant
+        # default values for FABulousPDN
+        if self.config["VDD_NETS"] == None:
+            env["VDD_NETS"] = "VPWR"
+        else:
+            env["VDD_NETS"] = ''.join(self.config["VDD_NETS"])
 
-        env["VDD_NETS"] = ''.join(self.config["VDD_NETS"])
-        env["GND_NETS"] = ''.join(self.config["GND_NETS"])
+        if self.config["GND_NETS"] == None:
+            env["GND_NETS"] = "VGND"
+        else:
+            env["GND_NETS"] = ''.join(self.config["GND_NETS"])
 
         return super().run(state_in, env=env, **kwargs)

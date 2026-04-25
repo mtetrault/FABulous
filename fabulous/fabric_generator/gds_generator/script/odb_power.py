@@ -38,8 +38,6 @@ def power(
 
 def power_pair(reader, current_vdd_net, current_gnd_net) -> None:
     """Connect power rails for the tiles using a custom script."""
-    # Create ground / power nets
-    tech = reader.db.getTech()
 
     # Create nets, if they don't exist yet
     # todo: review: is this part needed? If no macro has these power nets, no connection will be created.
