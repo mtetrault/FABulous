@@ -1,23 +1,13 @@
 """FABulous GDS Generator - ODB Power Connection Step."""
 
 from importlib import resources
+from typing import Tuple
 
 from librelane.config.flow import option_variables
 from librelane.steps.common_variables import pdn_variables
 from librelane.steps.odb import OdbpyStep
 from librelane.steps.step import Step, ViewsUpdate, MetricsUpdate
 from librelane.state.state import DesignFormat, State
-from typing import (
-    Any,
-    Dict,
-    List,
-    Literal,
-    Optional,
-    Set,
-    Tuple,
-    TypeAlias,
-    Union,
-)
 
 
 
