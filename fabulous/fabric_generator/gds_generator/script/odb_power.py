@@ -8,13 +8,14 @@
 #
 # Copyright (c) 2023 Sylvain Munaut <tnt@246tNt.com>
 # Copyright (c) 2025 Leo Moser <leo.moser@pm.me>
+# Copyright (c) 2026 FABulous Contributors
 # SPDX-License-Identifier: Apache-2.0
 #
 
 from typing import Any, Tuple
 
 import click
-import odb
+import odb as design_odb
 from librelane.logging.logger import info
 from librelane.scripts.odbpy.reader import click_odb
 
@@ -37,51 +38,49 @@ from librelane.scripts.odbpy.reader import click_odb
 @click_odb
 def power(
     reader: Any,  # noqa: ANN401
-    power_names: Tuple[str],
-    ground_names: Tuple[str],
+    power_names: tuple[str],
+    ground_names: tuple[str],
 ) -> None:
-
+    """Cycle through VDD_NETS and GND_NETS for the tiles using a custom script."""
     info(f"propagated VDD_NETS are {power_names}")
     info(f"propagated GND_NETS are {ground_names}")
 
     # todo: run on multi-power test case
+    # odb argument here enables pytest with monkeypatch
     for power_name in power_names:
-        draw_supply_net(reader, power_name, "POWER")
+        propagate_supply_net(design_odb, reader, power_name, "POWER")
 
     for ground_name in ground_names:
-        draw_supply_net(reader, ground_name, "GROUND")
+        propagate_supply_net(design_odb, reader, ground_name, "GROUND")
 
 
-def draw_supply_net(reader, supply_name, supply_type) -> None:
-    """Connect power rails for the tiles using a custom script."""
-
-    # todo: review: is this part needed? Or error if these nets don't exist at this stage?
+def propagate_supply_net(
+    layoutDb: Any,  # noqa: ANN401
+    reader: Any,  # noqa: ANN401
+    supply_name: str,
+    supply_type: str,
+) -> None:
+    """Connect single  power rail for the tiles using a custom script."""
     # Create nets, if they don't exist yet
     net = reader.block.findNet(supply_name)
     if net is None:
         # Create net
-        net = odb.dbNet.create(reader.block, supply_name)
+        net = layoutDb.dbNet.create(reader.block, supply_name)
         net.setSpecial()
         net.setSigType(supply_type)
-        info(f"Created {supply_name} with type {supply_type}")
+        info(f"Created {net.getName()} with type {net.getSigType()}")
 
     supply_net = reader.block.findNet(supply_name)
 
     # Create wires
-    supply_wire = odb.dbSWire.create(supply_net, "ROUTED")
+    supply_wire = layoutDb.dbSWire.create(supply_net, "ROUTED")
 
     # Create bterms (top-level)
-    supply_bterm = odb.dbBTerm.create(supply_net, supply_name)
+    supply_bterm = layoutDb.dbBTerm.create(supply_net, supply_name)
     supply_bterm.setIoType("INOUT")
     supply_bterm.setSigType(supply_net.getSigType())
     supply_bterm.setSpecial()
-    supply_bpin = odb.dbBPin_create(supply_bterm)
-
-    # until odb.dbSigType.POWER/GROUND are exposed
-    #todo: review this, or fallback to name only
-    #POWER  = vpwr_net.getSigType()
-    #GROUND = vgnd_net.getSigType()
-
+    supply_bpin = layoutDb.dbBPin_create(supply_bterm)
 
     # Connect instance-iterms to power nets,
     # draw the wires and pins
@@ -91,7 +90,7 @@ def draw_supply_net(reader, supply_name, supply_type) -> None:
             iterm_name = iterm.getMTerm().getName()
             iterm_sigtype = iterm.getMTerm().getSigType()
 
-            if iterm_name == supply_name:# and iterm_sigtype == POWER:
+            if iterm_name == supply_name:
                 info(f"Connecting {iterm_name} of type {iterm_sigtype}")
                 iterm.connect(supply_net)
 
@@ -103,11 +102,10 @@ def draw_supply_net(reader, supply_name, supply_type) -> None:
             if master_mterm.getName() == supply_name:
                 for mterm_mpins in master_mterm.getMPins():
                     for mpins_dbox in mterm_mpins.getGeometry():
-
                         metal_layer = mpins_dbox.getTechLayer()
 
                         if master_mterm.getName() == supply_name:
-                            odb.dbSBox_create(
+                            layoutDb.dbSBox_create(
                                 supply_wire,
                                 metal_layer,
                                 blk_inst.getLocation()[0] + mpins_dbox.xMin(),
@@ -116,7 +114,7 @@ def draw_supply_net(reader, supply_name, supply_type) -> None:
                                 blk_inst.getLocation()[1] + mpins_dbox.yMax(),
                                 "STRIPE",
                             )
-                            odb.dbBox_create(
+                            layoutDb.dbBox_create(
                                 supply_bpin,
                                 metal_layer,
                                 blk_inst.getLocation()[0] + mpins_dbox.xMin(),

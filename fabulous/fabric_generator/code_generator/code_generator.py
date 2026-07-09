@@ -481,6 +481,7 @@ class CodeGenerator(abc.ABC):
         portsPairs: list[tuple[str, str]],
         paramPairs: list[tuple[str, str]] | None = None,
         emulateParamPairs: list[tuple[str, str]] | None = None,
+        add_keep: bool = False,
         indentLevel: int = 0,
     ) -> None:
         """Add an instantiation.
@@ -504,15 +505,15 @@ class CodeGenerator(abc.ABC):
         emulateParamPairs : list[tuple[str, str]] | None, optional
             List of parameter signals of the component in emulation mode only.
             Defaults to None.
+        add_keep : bool, optional
+            Whether to add a FABulous "keep" attribute to the instance.
+            Defaults to False.
         indentLevel : int, optional
             The level of indentation. Defaults to 0.
 
         Examples
         --------
-        Verilog
-        -------
-        ::
-
+        Verilog:
             **compName** **compInsName** # (
                 . **paramPairs[0]** (**paramSignals[0]**),
                 . **paramPairs[1]** (**paramSignals[1]**),
@@ -525,10 +526,7 @@ class CodeGenerator(abc.ABC):
                 . **compPorts[n]** (**signals[n]**)
             );
 
-        VHDL
-        ----
-        ::
-
+        VHDL:
             **compInsName** : **compName**
                 generic map (
                     **paramPairs[0]** => **paramSignals[0]**,
@@ -659,12 +657,10 @@ class CodeGenerator(abc.ABC):
 
         Examples
         --------
-            Verilog
-            -------
+        Verilog:
             assign **left** = **right**;
 
-            VHDL
-            ----
+        VHDL:
             **left** <= **right** after **delay** ps;
         """
 
@@ -697,13 +693,56 @@ class CodeGenerator(abc.ABC):
 
         Examples
         --------
-        Verilog
-        -------
-        assign **left** = **right** [**widthL**:**widthR**];
+        Verilog:
+            assign **left** = **right** [**widthL**:**widthR**];
 
-        VHDL
-        ----
-        **left** <= **right** ( **widthL** downto *widthR* );
+        VHDL:
+            **left** <= **right** ( **widthL** downto *widthR* );
+        """
+
+    @abc.abstractmethod
+    def addMuxAssign(
+        self,
+        output: str,
+        inputVector: str,
+        selectVector: str,
+        selectLow: int,
+        selectWidth: int,
+        delay: int = 0,
+        indentLevel: int = 0,
+    ) -> None:
+        """Assign a behavioral multiplexer output from a select slice.
+
+        Drives **output** with the element of **inputVector** chosen by the
+        ``selectWidth``-bit slice of **selectVector** starting at bit
+        **selectLow**. Each backend emits the indexing in its own syntax: a
+        Verilog vector index, a VHDL ``to_integer(unsigned(...))`` conversion.
+
+        Parameters
+        ----------
+        output : str
+            The signal driven with the selected input.
+        inputVector : str
+            The concatenated mux inputs being indexed.
+        selectVector : str
+            The vector holding the select bits (e.g. ``ConfigBits``).
+        selectLow : int
+            Index of the lowest select bit within **selectVector**.
+        selectWidth : int
+            Number of select bits.
+        delay : int, optional
+            Delay in the assignment. Defaults to 0.
+        indentLevel : int, optional
+            The indentation Level. Defaults to 0.
+
+        Examples
+        --------
+        Verilog:
+            assign **output** = **inputVector**[**selectVector**[high:low]];
+
+        VHDL:
+            **output** <= **inputVector**(to_integer(unsigned(
+            **selectVector**(high downto low)))) after **delay** ps;
         """
 
     @abc.abstractmethod
@@ -719,12 +758,10 @@ class CodeGenerator(abc.ABC):
 
         Examples
         --------
-            Verilog
-            -------
+        Verilog:
             \`ifdef **macro**
 
-            VHDL
-            ----
+        VHDL:
             unsupported
         """
 
@@ -741,12 +778,10 @@ class CodeGenerator(abc.ABC):
 
         Examples
         --------
-            Verilog
-            -------
+        Verilog:
             \`ifndef **macro**
 
-            VHDL
-            ----
+        VHDL:
             unsupported
         """
 
@@ -761,13 +796,11 @@ class CodeGenerator(abc.ABC):
 
         Examples
         --------
-        Verilog
-        -------
-        \`else
+        Verilog:
+            \`else
 
-        VHDL
-        ----
-        unsupported
+        VHDL:
+            unsupported
         """
 
     @abc.abstractmethod
@@ -781,13 +814,11 @@ class CodeGenerator(abc.ABC):
 
         Examples
         --------
-        Verilog
-        -------
-        \`endif
+        Verilog:
+            \`endif
 
-        VHDL
-        ----
-        unsupported
+        VHDL:
+            unsupported
         """
 
     @abc.abstractmethod

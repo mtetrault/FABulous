@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from pytest_mock import MockerFixture
 
 from fabulous.fabulous_settings import (
+    MODELS_PACK_REQUIRED_MODULES,
     FABulousSettings,
     get_context,
     init_context,
@@ -101,6 +102,41 @@ class TestFABulousSettings:
         assert settings.switch_matrix_debug_signal is True
         assert settings.proj_version_created == Version("1.2.3")
 
+    def test_max_worker_zero_accepted(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        """FAB_MAX_WORKER=0 is accepted (the 0->default mapping happens in the pool)."""
+        monkeypatch.setenv("PATH", "/bin:/usr/bin")
+        monkeypatch.setenv("FAB_MAX_WORKER", "0")
+        mocker.patch("fabulous.fabulous_settings.which", return_value=None)
+
+        settings = init_context(project)
+
+        assert settings.max_worker == 0
+
+    def test_max_worker_positive_preserved(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        """A positive FAB_MAX_WORKER is kept as the requested worker count."""
+        monkeypatch.setenv("PATH", "/bin:/usr/bin")
+        monkeypatch.setenv("FAB_MAX_WORKER", "4")
+        mocker.patch("fabulous.fabulous_settings.which", return_value=None)
+
+        settings = init_context(project)
+
+        assert settings.max_worker == 4
+
+    def test_max_worker_negative_rejected(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        """A negative FAB_MAX_WORKER fails validation rather than being normalised."""
+        monkeypatch.setenv("PATH", "/bin:/usr/bin")
+        monkeypatch.setenv("FAB_MAX_WORKER", "-1")
+        mocker.patch("fabulous.fabulous_settings.which", return_value=None)
+
+        with pytest.raises(ValidationError):
+            init_context(project)
+
     def test_initialization_with_tool_paths_found(
         self, project: Path, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
     ) -> None:
@@ -178,6 +214,41 @@ class TestFABulousSettings:
 
         settings = init_context(project)
         assert settings.pdk_hash == "abc123def456"
+
+    @pytest.mark.parametrize(
+        ("configured_pdk", "expected_pdk"),
+        [
+            ("sky130", "sky130A"),
+            ("sky130B", "sky130B"),
+            ("sky130A", "sky130A"),
+            ("ihp-sg13g2", "ihp-sg13g2"),
+            ("gf180mcu", "gf180mcuD"),
+        ],
+    )
+    def test_pdk_variant_resolution(
+        self,
+        project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        tmp_path: Path,
+        configured_pdk: str,
+        expected_pdk: str,
+    ) -> None:
+        """FAB_PDK family names auto-resolve to default variant; variants stay."""
+        pdk_root = tmp_path / "pdk_root"
+        pdk_root.mkdir()
+        monkeypatch.setenv("FAB_PDK", configured_pdk)
+        monkeypatch.setenv("FAB_PDK_ROOT", str(pdk_root))
+        monkeypatch.setenv("FAB_PDK_HASH", "deadbeef" * 5)
+
+        mocker.patch("fabulous.fabulous_settings.which", return_value=None)
+        mocker.patch(
+            "fabulous.fabulous_settings.get_pdk_hash", return_value="deadbeef" * 5
+        )
+        mocker.patch("ciel.manage.enable")
+
+        settings = init_context(project)
+        assert settings.pdk == expected_pdk
 
 
 class TestFieldValidators:
@@ -305,6 +376,114 @@ class TestToolPathResolution:
 
         assert result == "yosys"
         mock_which.assert_called_once_with("yosys")
+
+
+class TestModelsPackValidation:
+    """Tests for models-pack definition presence checks."""
+
+    @staticmethod
+    def _clear_fab_env(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Remove FAB_* env vars to avoid cross-test leakage."""
+        for key in list(os.environ.keys()):
+            if key.startswith("FAB_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_models_pack_missing_required_definitions_warns_verilog(
+        self,
+        project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Warn when a Verilog models-pack misses required module definitions."""
+        self._clear_fab_env(monkeypatch)
+        mocker.patch("fabulous.fabulous_settings.which", return_value=None)
+
+        models_pack = project / "Fabric" / "models_pack_incomplete.v"
+        models_pack.write_text(
+            "module config_latch(); endmodule\n"
+            "module my_buf(); endmodule\n"
+            "// module clk_buf(); endmodule\n"
+        )
+
+        monkeypatch.setenv("FAB_PROJ_DIR", str(project))
+        monkeypatch.setenv("FAB_PROJ_LANG", "verilog")
+        monkeypatch.setenv("FAB_MODELS_PACK", str(models_pack))
+
+        settings = init_context(project)
+
+        assert settings.models_pack == models_pack.resolve()
+        assert any(
+            "missing the following models-pack definitions" in r.message
+            and "clk_buf" in r.message
+            for r in caplog.records
+        )
+
+    def test_models_pack_missing_required_definitions_warns_vhdl(
+        self,
+        project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Warn when a VHDL models-pack misses required entity definitions."""
+        self._clear_fab_env(monkeypatch)
+        mocker.patch("fabulous.fabulous_settings.which", return_value=None)
+
+        models_pack = project / "Fabric" / "my_lib_incomplete.vhdl"
+        models_pack.write_text(
+            "entity CONFIG_LATCH is\n"
+            "end entity CONFIG_LATCH;\n"
+            "entity MY_BUF is\n"
+            "end entity MY_BUF;\n"
+            "-- entity CLK_BUF is\n"
+            "-- end entity CLK_BUF;\n"
+        )
+
+        monkeypatch.setenv("FAB_PROJ_DIR", str(project))
+        monkeypatch.setenv("FAB_PROJ_LANG", "vhdl")
+        monkeypatch.setenv("FAB_MODELS_PACK", str(models_pack))
+
+        settings = init_context(project)
+
+        assert settings.models_pack == models_pack.resolve()
+        assert any(
+            "missing the following models-pack definitions" in r.message
+            and "clk_buf" in r.message
+            for r in caplog.records
+        )
+
+    def test_models_pack_with_all_required_definitions_has_no_missing_warning(
+        self,
+        project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Do not warn when all required Verilog definitions are present."""
+        self._clear_fab_env(monkeypatch)
+        mocker.patch("fabulous.fabulous_settings.which", return_value=None)
+
+        models_pack = project / "Fabric" / "models_pack_complete.v"
+        models_pack.write_text(
+            "\n".join(
+                f"module {module_name}(); endmodule"
+                for module_name in MODELS_PACK_REQUIRED_MODULES
+            )
+            + "\n"
+        )
+
+        monkeypatch.setenv("FAB_PROJ_DIR", str(project))
+        monkeypatch.setenv("FAB_PROJ_LANG", "verilog")
+        monkeypatch.setenv("FAB_MODELS_PACK", str(models_pack))
+
+        settings = init_context(project)
+
+        assert settings.models_pack == models_pack.resolve()
+        assert not any(
+            "missing the following models-pack definitions" in r.message
+            for r in caplog.records
+        )
 
 
 class TestContextMethods:
@@ -742,6 +921,12 @@ class TestCheckPdkAutoResolution:
 
         Parameters
         ----------
+        project : Path
+            Project directory path.
+        monkeypatch : pytest.MonkeyPatch
+            Pytest monkeypatch fixture for environment manipulation.
+        mocker : MockerFixture
+            Pytest-mock mocker fixture.
         pdk_name : str
             PDK family name (used for env var and default pdk_root path).
         pdk_root : Path | None
@@ -754,6 +939,11 @@ class TestCheckPdkAutoResolution:
         mock_ciel_enable : bool
             When True (default), mock ``ciel.manage.enable`` so tests don't
             make real network calls.
+
+        Returns
+        -------
+        Path | None
+            The pdk_root path if set_pdk_root_env is True, otherwise None.
         """
         for key in list(os.environ.keys()):
             if key.startswith("FAB_"):

@@ -51,6 +51,9 @@ class VHDLCodeGenerator(CodeGenerator):
             The indentation level
         """
         #   library template
+        self._add(f"package attr_pack_{name} is")
+        self._add(" attribute keep : string;")
+        self._add("end package;")
         self._add("library IEEE;", indentLevel)
         self._add("use IEEE.STD_LOGIC_1164.ALL;", indentLevel)
         self._add("use IEEE.NUMERIC_STD.ALL;", indentLevel)
@@ -422,6 +425,43 @@ end process;
         inv = "not " if inverted else ""
         self._add(f"{left} <= {inv}{right}( {widthL} downto {widthR} );", indentLevel)
 
+    def addMuxAssign(
+        self,
+        output: str,
+        inputVector: str,
+        selectVector: str,
+        selectLow: int,
+        selectWidth: int,
+        delay: int = 0,
+        indentLevel: int = 0,
+    ) -> None:
+        """Assign a behavioral mux output, converting the select slice to integer.
+
+        VHDL array indices must be integers, so the ``std_logic_vector`` select
+        slice is converted with ``to_integer(unsigned(...))``.
+
+        Parameters
+        ----------
+        output : str
+            Signal driven with the selected input.
+        inputVector : str
+            Concatenated mux inputs being indexed.
+        selectVector : str
+            Vector holding the select bits.
+        selectLow : int
+            Index of the lowest select bit.
+        selectWidth : int
+            Number of select bits.
+        delay : int
+            Delay in picoseconds.
+        indentLevel : int
+            The indentation level.
+        """
+        selectHigh = selectLow + selectWidth - 1
+        index = f"to_integer(unsigned({selectVector}({selectHigh} downto {selectLow})))"
+        delayStr = f" after {delay} ps" if delay else ""
+        self._add(f"{output} <= {inputVector}({index}){delayStr};", indentLevel)
+
     def addInstantiation(
         self,
         compName: str,
@@ -429,6 +469,7 @@ end process;
         portsPairs: list[tuple[str, str]],
         paramPairs: list[tuple[str, str]] | None = None,
         emulateParamPairs: list[tuple[str, str]] | None = None,
+        add_keep: bool = False,  # noqa: ARG002 — accepted for API parity; VHDL has no keep attr
         indentLevel: int = 0,
     ) -> None:
         """Add a component instantiation.
@@ -445,6 +486,8 @@ end process;
             List of (parameter, value) pairs for generic mapping
         emulateParamPairs : list[tuple[str, str]] | None
             Additional parameters (unused)
+        add_keep : bool
+            Accepted for API parity with the Verilog generator (no-op in VHDL)
         indentLevel : int
             The indentation level
         """
@@ -480,7 +523,8 @@ end process;
                 )
             split = signal.split(",")
             if len(split) == 1:
-                connectPair.append(f"{port} => {signal}")
+                rhs = signal or "open"
+                connectPair.append(f"{port} => {rhs}")
             else:
                 for idx, sn in zip(reversed(range(len(split))), split, strict=False):
                     connectPair.append(
@@ -544,12 +588,12 @@ end process;
 ConfigBitsInput <= ConfigBits(ConfigBitsInput'high-1 downto 0) & CONFin;
 -- for k in 0 to Conf/2 generate
 L: for k in 0 to {int(math.ceil(configBitCounter / 2.0)) - 1} generate
-        inst_LHQD1a : LHQD1
+        inst_config_latch_a : config_latch
         Port Map(
             D    => ConfigBitsInput(k*2),
             E    => CLK,
             Q    => ConfigBits(k*2) );
-        inst_LHQD1b : LHQD1
+        inst_config_latch_b : config_latch
         Port Map(
             D    => ConfigBitsInput((k*2)+1),
             E    => MODE,

@@ -1,7 +1,7 @@
 """Global pytest configuration and fixtures for all FABulous tests."""
 
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import pytest
@@ -10,17 +10,95 @@ from loguru import logger
 
 import fabulous.fabulous
 import fabulous.fabulous_settings
+from fabulous.fabric_definition.bel import Bel
+from fabulous.fabric_definition.define import IO, Direction, HDLType, Side
+from fabulous.fabric_definition.port import Port
+from fabulous.fabric_definition.tile import Tile
 from fabulous.fabulous_cli.fabulous_cli import FABulous_CLI
 from fabulous.fabulous_cli.helper import create_project, setup_logger
 from fabulous.fabulous_settings import init_context, reset_context
 
 
-def pytest_addoption(parser: pytest.Parser) -> None:  # type: ignore[name-defined]
-    """Add command line option to include slow tests explicitly.
+def sjump_port(
+    name: str,
+    inOut: IO,
+    wireCount: int = 2,
+    xOffset: int = 0,
+    yOffset: int = 0,
+) -> Port:
+    """Build an SJUMP port.
 
-    Usage: pytest --runslow
-    Without this flag, tests marked with @pytest.mark.slow are skipped via
-    addopts filter.
+    OUTPUT ports drive `sourceName`; INPUT ports terminate at
+    `destinationName`. SJUMP ports carry zero offsets, which is exactly the
+    case the width fix in `expandPortInfo*` has to handle.
+    """
+    return Port(
+        wireDirection=Direction.SJUMP,
+        sourceName=name if inOut == IO.OUTPUT else "NULL",
+        xOffset=xOffset,
+        yOffset=yOffset,
+        destinationName=name if inOut == IO.INPUT else "NULL",
+        wireCount=wireCount,
+        name=name,
+        inOut=inOut,
+        sideOfTile=Side.ANY,
+    )
+
+
+def make_empty_tile(
+    name: str,
+    ports: list[Port] | None = None,
+    *,
+    tileDir: Path = Path(),
+    matrixDir: Path = Path(),
+    pinOrderConfig: dict | None = None,
+) -> Tile:
+    """Build a minimal Tile usable inside a SuperTile.tileMap.
+
+    Passing `pinOrderConfig={}` skips the GDS pin-order import; the `None`
+    default preserves the original behaviour for callers that don't care.
+    """
+    return Tile(
+        name=name,
+        ports=ports or [],
+        bels=[],
+        tileDir=tileDir,
+        matrixDir=matrixDir,
+        gen_ios=[],
+        userCLK=False,
+        pinOrderConfig=pinOrderConfig,
+    )
+
+
+def make_muladd_bel(internal: list[tuple[str, IO]], *, prefix: str = "SUPER_") -> Bel:
+    """Build a MULADD-style supertile BEL with only its internal pins populated."""
+    return Bel(
+        src=Path("MULADD.v"),
+        prefix=prefix,
+        module_name="MULADD",
+        internal=internal,
+        external=[],
+        configPort=[],
+        sharedPort=[],
+        configBit=0,
+        belMap={},
+        userCLK=False,
+        ports_vectors={},
+        carry={},
+        localShared={},
+    )
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:  # type: ignore[name-defined]
+    """Register opt-in flags for the marker-gated test buckets.
+
+    Usage:
+        pytest --runslow
+        pytest --gl --gl-fabric-project=<path>
+
+    Without these flags, tests marked ``@pytest.mark.slow`` /
+    ``@pytest.mark.gl`` are excluded via the default ``addopts`` filter in
+    ``pyproject.toml``.
     """
     parser.addoption(
         "--runslow",
@@ -28,15 +106,35 @@ def pytest_addoption(parser: pytest.Parser) -> None:  # type: ignore[name-define
         default=False,
         help="run tests marked as slow (overrides default '-m not slow')",
     )
+    parser.addoption(
+        "--gl",
+        action="store_true",
+        default=False,
+        help="run gate-level (GL) simulation tests; requires a fabric project "
+        "hardened by the GDS flow (see --gl-fabric-project)",
+    )
+    parser.addoption(
+        "--gl-fabric-project",
+        action="store",
+        default=None,
+        help="path to a FABulous project that has been run through "
+        "`gen_fabric_macro` (must contain Fabric/macro/final_views/). "
+        "May also be supplied via the FAB_GL_FABRIC_PROJECT env var. "
+        "Typically the unpacked `fabric-output-<pdk>` artifact from "
+        "gds-flow-ci.yml.",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:  # type: ignore[name-defined]
-    # If --runslow is given, remove the '-m not slow' filter so slow tests run.
-    if (
-        config.getoption("runslow")
-        and getattr(config.option, "markexpr", None) == "not slow"
-    ):
-        config.option.markexpr = ""
+    user_args = config.invocation_params.args
+    if any(a.startswith(("-m", "--markexpr")) for a in user_args):
+        return
+    exclude = []
+    if not config.getoption("runslow"):
+        exclude.append("not slow")
+    if not config.getoption("gl"):
+        exclude.append("not gl")
+    config.option.markexpr = " and ".join(exclude)
 
 
 def normalize(block: str) -> list[str]:
@@ -69,22 +167,32 @@ def fabulous_test_environment(
     """Set up global test environment for FABulous tests."""
     fabulous_root = str(Path(__file__).resolve().parent.parent / "FABulous")
 
-    for i in os.environ:
-        monkeypatch.delenv(i[0], raising=False)
+    # FAB_GL_FABRIC_PROJECT selects the hardened project for the GL suite; it
+    # is test-control input, not project state, so it must survive the scrub.
+    for key in list(os.environ.keys()):
+        if key.startswith("FAB_") and key != "FAB_GL_FABRIC_PROJECT":
+            monkeypatch.delenv(key, raising=False)
 
     fake_user_config_dir = tmp_path / ".fabulous"
 
-    # Set test environment using monkeypatch for automatic cleanup
     monkeypatch.setenv("FAB_ROOT", fabulous_root)
     monkeypatch.setenv("FABULOUS_TESTING", "TRUE")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(Path, "home", lambda _: tmp_path)
-    # FAB_USER_CONFIG_DIR is computed at module import time, so Path.home()
-    # patching above is too late. Patch the constant directly in both modules.
     monkeypatch.setattr(
         fabulous.fabulous_settings, "FAB_USER_CONFIG_DIR", fake_user_config_dir
     )
     monkeypatch.setattr(fabulous.fabulous, "FAB_USER_CONFIG_DIR", fake_user_config_dir)
+    monkeypatch.setattr(
+        fabulous.fabulous_settings.ciel.manage,
+        "enable",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        fabulous.fabulous_settings,
+        "get_ciel_home",
+        lambda: str(tmp_path / ".ciel"),
+    )
     (tmp_path / ".ciel" / "ihp-sg13g2").mkdir(parents=True, exist_ok=True)
     setup_logger(0, False)
 
@@ -93,13 +201,36 @@ def fabulous_test_environment(
     reset_context()
 
 
-@pytest.fixture
-def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FABulous_CLI:
-    """Create a FABulous CLI instance for testing with a temporary project."""
+def make_default_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a fresh empty Verilog project and point ``FAB_PROJ_DIR`` at it.
+
+    Shared by the base ``fabulous_project`` fixture and any nested-conftest
+    override that needs to reproduce the default (non-overridden) behaviour
+    without re-entering the fixture by name.
+    """
     project_dir = tmp_path / "test_project"
     monkeypatch.setenv("FAB_PROJ_DIR", str(project_dir))
     create_project(project_dir)
-    init_context(project_dir)
+    return project_dir
+
+
+@pytest.fixture
+def fabulous_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A FABulous project the ``cli`` fixture should bind to.
+
+    Default behaviour creates a fresh empty Verilog project under
+    ``tmp_path``. Override this fixture in a nested conftest to point ``cli``
+    at a different project — e.g. the GL suite overrides it to return the
+    per-test copy of a hardened LibreLane project. The override is what lets
+    GL tests reuse the global ``cli`` fixture without any further plumbing.
+    """
+    return make_default_project(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def cli(fabulous_project: Path) -> FABulous_CLI:
+    """Create a FABulous CLI instance bound to ``fabulous_project``."""
+    init_context(fabulous_project)
     cli = FABulous_CLI(
         "verilog",
         force=False,
@@ -120,8 +251,6 @@ def cleanup_logger() -> Generator[None]:
     quickly.
     """
     yield
-    # Remove all logger handlers to prevent logging to closed files
-    # This handles cleanup for both regular logging and caplog fixtures
     logger.remove()
 
 
@@ -136,14 +265,37 @@ def caplog(caplog: LogCaptureFixture) -> LogCaptureFixture:
         enqueue=False,  # Set to 'True' if your test is spawning child processes.
     )
     return caplog
-    # No need to remove specific handler - cleanup_logger removes all handlers
 
 
 @pytest.fixture
-def project(tmp_path: Path) -> Generator[Path]:
-    project_dir = tmp_path / "test_project"
-    create_project(project_dir)
-    yield project_dir
+def project_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[..., Path]:
+    """Return a callable that creates a FABulous project in a temp directory.
 
-    # Cleanup
-    reset_context()  # Reset context after each test to avoid state leakage
+    The returned callable accepts `lang` to choose Verilog vs VHDL and an
+    optional `name` for the directory (default `test_project`). It also
+    chdirs into the temp directory and sets `FAB_PROJ_DIR` via monkeypatch
+    so context lookups resolve to the newly created project.
+    """
+
+    def _create(lang: HDLType = HDLType.VERILOG, name: str = "test_project") -> Path:
+        project_dir = tmp_path / name
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("FAB_PROJ_DIR", str(project_dir))
+        create_project(project_dir, lang=lang)
+        return project_dir
+
+    return _create
+
+
+@pytest.fixture
+def project(project_factory: Callable[..., Path]) -> Path:
+    """Verilog FABulous project in a temp directory."""
+    return project_factory()
+
+
+@pytest.fixture
+def project_vhdl(project_factory: Callable[..., Path]) -> Path:
+    """VHDL FABulous project in a temp directory."""
+    return project_factory(lang=HDLType.VHDL)

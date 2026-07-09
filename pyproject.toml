@@ -33,7 +33,6 @@ dependencies = [
   "typer>=0.20.0",
   "FABulous-bit-gen>=0.2.0",
   'PyYAML>=6.0.0',
-  'click>=8.0.0',
   # OS-aware readline dependencies
   'pyreadline3>=3.4.0; sys_platform == "win32"',
   'gnureadline>=8.2.0; sys_platform != "win32"',
@@ -42,6 +41,8 @@ dependencies = [
   "pymoo>=0.6.1.5",
   "numpy>=2.3.4",
   "dill>=0.4.0",
+  "networkx>=3.6.1",
+  "sdf-timing",
   "ciel>=2.4.0",
   "go-task-bin>=3.40.0",
 ]
@@ -65,11 +66,15 @@ local_scheme = "node-and-date"
 
 [tool.setuptools.packages.find]
 exclude = [
-  "docs",
-  "tests",
-  "scripts",
-  "nix",
-] # exclude packages matching these glob patterns (empty by default)
+  "docs*",
+  "tests*",
+  "scripts*",
+  "nix*",
+] # trailing * is required to also exclude sub-packages (e.g. tests.unit)
+
+[tool.setuptools.cmdclass]
+build_py = "build_hooks.BuildPyWithFabulousNix"
+
 
 [tool.setuptools.package-data]
 fabulous = ["**/*"]
@@ -104,6 +109,9 @@ exclude = [
   "oss-cad-suite",
   "scripts",
   ".claude",
+  "fabulous_nix",
+  ".codex",
+  "ttsim*",
 ]
 
 [dependency-groups]
@@ -126,7 +134,15 @@ parallel = true
 source = ["fabulous"]
 
 [tool.coverage.report]
-omit = ["*/__init__.py", "*/__pycache__/*", "tests/*", "demo/*", "docs/*"]
+omit = [
+  "*/__init__.py",
+  "*/__pycache__/*",
+  "tests/*",
+  "demo/*",
+  "docs/*",
+  "build_hooks.py",
+  "fabulous_nix",
+]
 show_missing = true
 skip_covered = true
 
@@ -138,16 +154,29 @@ directory = "coverage_html"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: marks tests as slow (use --runslow to include)"]
-addopts = "-m 'not slow'"
+markers = [
+  "slow: marks tests as slow (use --runslow to include)",
+  "gl: gate-level simulation against a hardened fabric netlist (use --gl)",
+]
+addopts = "-m 'not slow and not gl'"
 
 [tool.deptry]
 # Ignore platform-specific readline dependencies for DEP002 (defined but not used)
 # These are indirect requirements needed by cmd2 and other interactive CLI tools
-extend_exclude = ["fabulous/fabric_generator/gds_generator/script", "docs"]
+extend_exclude = [
+  "fabulous/fabric_generator/gds_generator/script",
+  "docs",
+  "build_hooks.py",
+]
 
 [tool.deptry.per_rule_ignores]
-DEP002 = ["pyreadline3", "gnureadline", "go-task-bin"]
+DEP002 = ["pyreadline3", "gnureadline", "go-task-bin", "FABulous-bit-gen"]
 
 [tool.deptry.package_module_name_map]
 FABulous-bit-gen = "FABulous_bit_gen"
+
+[tool.uv.sources]
+sdf-timing = { git = "https://github.com/FPGA-Research/f4pga-sdf-timing.git" }
+
+[tool.uv.extra-build-dependencies]
+sdf-timing = ["vcs-versioning"]

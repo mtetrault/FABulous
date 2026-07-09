@@ -40,6 +40,14 @@
       url = "git+https://github.com/YosysHQ/yosys?submodules=1";
       flake = false;
     };
+    # ghdl-yosys-plugin tracks ghdl master and has no GitHub releases, only a
+    # `ghdl-v<X>` tag that lines up with each ghdl release. Pin to the tag
+    # matching our ghdl-bin version; bumping ghdl-bin should bump this in
+    # lockstep.
+    ghdl-yosys-plugin-src = {
+      url = "github:ghdl/ghdl-yosys-plugin/ghdl-v6.0.0";
+      flake = false;
+    };
     nextpnr-src = {
       url = "github:YosysHQ/nextpnr";
       flake = false;
@@ -67,6 +75,7 @@
       ghdl-bin-x86_64-linux,
       ghdl-bin-aarch64-darwin,
       yosys-src,
+      ghdl-yosys-plugin-src,
       nextpnr-src,
       fabulator-src,
       pyproject-nix,
@@ -95,7 +104,7 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          python = nixpkgs.legacyPackages.${system}.python312;
+          python = nixpkgs.legacyPackages.${system}.python3;
         in
         (pkgs.callPackage pyproject-nix.build.packages {
           inherit python;
@@ -144,6 +153,7 @@
               ghdl-linux-bin = ghdl-bin-x86_64-linux;
               ghdl-darwin-bin = ghdl-bin-aarch64-darwin;
               yosys = yosys-src;
+              ghdl-yosys-plugin = ghdl-yosys-plugin-src;
               nextpnr = nextpnr-src;
               fabulator = fabulator-src;
             };
@@ -155,8 +165,8 @@
           # want to include the full librelane-env in packages (would collide with virtualenv).
           # Instead, we'll add it to NIX_PYTHONPATH.
           librelane-python-path = "${librelane-pkg}/${pkgs.python3.sitePackages}";
-          tkinter-pkg = nixpkgs.legacyPackages.${system}.python312Packages.tkinter;
-          tkinter-python-path = "${tkinter-pkg}/${nixpkgs.legacyPackages.${system}.python312.sitePackages}";
+          tkinter-pkg = nixpkgs.legacyPackages.${system}.python3Packages.tkinter;
+          tkinter-python-path = "${tkinter-pkg}/${nixpkgs.legacyPackages.${system}.python3.sitePackages}";
 
           # Combine all packages: librelane tools (with patched OpenROAD) + our custom tools + uv2nix env
           # Note: We only include virtualenv for Python, not librelane-env, to avoid collisions
@@ -180,6 +190,7 @@
             customPkgs.nextpnr
             customPkgs.fabulator
             customPkgs.ghdl
+            pkgs.nvc
           ]
           ++ (builtins.filter systemSupported librelane-pkg.includedTools);
 
@@ -193,6 +204,13 @@
               {
                 name = "FAB_YOSYS_PATH";
                 value = "fab-yosys";
+              }
+              {
+                # libghdl loaded by the yosys ghdl plugin can't derive its own
+                # install prefix (only the ghdl binary can), so it can't find
+                # the IEEE libraries without GHDL_PREFIX.
+                name = "GHDL_PREFIX";
+                value = "${customPkgs.ghdl}/lib/ghdl";
               }
               {
                 name = "NIX_PYTHONPATH";
@@ -221,7 +239,7 @@
             ];
             devshell.startup.fabulous-setup = {
               text = ''
-                export REPO_ROOT=$(git rev-parse --show-toplevel)
+                [ -n "''${REPO_ROOT:-}" ] || export REPO_ROOT="${toString ./.}"
                 ORIGINAL_PS1="$PS1"
 
                 . ${virtualenv}/bin/activate
@@ -270,6 +288,105 @@
               };
             }
           );
+
+          # Dedicated shell for `fabulous nix-env`.
+          # Uses pkgs.mkShell so tools are in buildInputs (available to --command).
+          # The shellHook sources three scripts from the nix store:
+          #   1. setup  — env vars, virtualenv, PYTHONPATH
+          #   2. verify — checks EDA tools are from /nix/store
+          #   3. shell  — execs into the user's preferred shell (FAB_NIX_SHELL)
+          nix-env =
+            let
+              inherit (nixpkgs.legacyPackages.${system}) mkShell writeShellScript writeText;
+              nixBinPath = lib.makeBinPath allPackages;
+
+              setupScript = writeShellScript "fab-nix-setup.sh" ''
+                # Deactivate any active venv/conda to avoid PATH conflicts
+                if [ -n "''${VIRTUAL_ENV:-}" ] && type deactivate &>/dev/null; then
+                  deactivate
+                fi
+                unset VIRTUAL_ENV CONDA_PREFIX CONDA_DEFAULT_ENV
+
+                # FAB_YOSYS_PATH: tells FABulous the nix yosys binary is named fab-yosys
+                export FAB_YOSYS_PATH="fab-yosys"
+
+                # GHDL_PREFIX: libghdl loaded by the yosys ghdl plugin needs
+                # this to locate the IEEE libraries (the ghdl binary derives
+                # this itself, but a dlopen'd libghdl cannot).
+                export GHDL_PREFIX="${customPkgs.ghdl}/lib/ghdl"
+
+                export REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+                . ${virtualenv}/bin/activate
+
+                # Build PYTHONPATH so librelane + venv + repo root are importable
+                _nix_py="${librelane-python-path}:${tkinter-python-path}"
+                VENV_SITE=$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)
+                if [ -n "$VENV_SITE" ]; then
+                  export PYTHONPATH="$_nix_py:$VENV_SITE:$REPO_ROOT"
+                else
+                  export PYTHONPATH="$_nix_py:$REPO_ROOT"
+                fi
+
+                # Prepend nix tool paths LAST so they take precedence
+                export PATH="${nixBinPath}:$PATH"
+                export PS1="\[\033[1;34m\][fab-nix]\[\033[0m\] ''${PS1:-\$ }"
+              '';
+
+              # Verify silently: exits with error if any tool is missing.
+              # Skipped when FAB_NIX_NO_CHECK=1 (--no-check flag).
+              verifyScript = writeShellScript "fab-nix-verify.sh" ''
+                if [ "''${FAB_NIX_NO_CHECK:-}" = "1" ]; then
+                  return 0 2>/dev/null || exit 0
+                fi
+
+                TOOLS="fab-yosys:yosys nextpnr-generic:nextpnr openroad:openroad"
+                MISSING=""
+                for entry in $TOOLS; do
+                  cmd="''${entry%%:*}"
+                  label="''${entry##*:}"
+                  path=$(which "$cmd" 2>/dev/null)
+                  if [ -z "$path" ] || ! echo "$path" | grep -q "^/nix/"; then
+                    MISSING="$MISSING $label"
+                  fi
+                done
+
+                if [ -n "$MISSING" ]; then
+                  echo >&2 "ERROR: The following EDA tools are not from the Nix store:$MISSING"
+                  echo >&2 "Please report this issue at https://github.com/FPGA-Research/FABulous/issues"
+                  return 1 2>/dev/null || exit 1
+                fi
+              '';
+
+              # Fish -C runs AFTER config files, re-prepending nix paths
+              # that fish's config may have reordered (nix-darwin#1607).
+              fishInitScript = writeText "fab-fish-init.fish" ''
+                for p in (string split ":" "$_FAB_NIX_BIN_PATH")
+                  test -n "$p"; and fish_add_path --prepend --move $p
+                end
+                set -e _FAB_NIX_BIN_PATH
+              '';
+
+              shellSwitchScript = writeShellScript "fab-nix-shell-switch.sh" ''
+                if [ -n "''${FAB_NIX_SHELL:-}" ]; then
+                  case "''${FAB_NIX_SHELL}" in
+                    fish)
+                      export _FAB_NIX_BIN_PATH="${nixBinPath}"
+                      exec fish -C "source ${fishInitScript}"
+                      ;;
+                    bash) ;;
+                    *) exec "''${FAB_NIX_SHELL}" ;;
+                  esac
+                fi
+              '';
+            in
+            mkShell {
+              buildInputs = allPackages;
+              shellHook = ''
+                . ${setupScript}
+                . ${verifyScript}
+                . ${shellSwitchScript}
+              '';
+            };
         }
       );
 

@@ -3,7 +3,7 @@ default_language_version:
   python: python3.12
 repos:
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.9.7
+    rev: 0.11.25
     hooks:
       - id: uv-lock
 
@@ -17,23 +17,13 @@ repos:
       - id: check-toml
       - id: no-commit-to-branch
 
-  - repo: https://github.com/PyCQA/docformatter.git
-    rev: "v1.7.7"
-    hooks:
-      - id: docformatter
-        name: docformatter
-        description: "Formats docstrings to follow PEP 257."
-        args: [--in-place, --black]
-        language: python
-        types: [python]
-
   - repo: local
     hooks:
       - id: interrogate
         name: interrogate
         entry: interrogate
         language: python
-        args: [-vv, -c, pyproject.toml]
+        args: [ -vv, -c, pyproject.toml ]
         pass_filenames: false # needed if excluding files with pyproject.toml or setup.cfg
       - id: deptry
         name: deptry
@@ -42,7 +32,7 @@ repos:
         pass_filenames: false
         always_run: true
   - repo: https://github.com/Lucas-C/pre-commit-hooks
-    rev: v1.5.5
+    rev: v1.5.6
     hooks:
       - id: forbid-crlf
       - id: remove-crlf
@@ -51,18 +41,50 @@ repos:
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.12.12
+    rev: v0.15.20
     hooks:
       # Run the linter.
       - id: ruff
-        args: [--fix]
+        args: [ --fix ]
       # Run the formatter.
       - id: ruff-format
 
   - repo: https://github.com/jsh9/pydoclint
-    rev: 0.7.3
+    rev: 0.9.0
     hooks:
       - id: pydoclint
-        args: [--style=numpy]
-        exclude: ^(tests/|FABulous/FABulous_CLI/FABulous_CLI\.py$)
+        args: [ --style=numpy ]
 
+  - repo: https://github.com/jeremiah-c-leary/vhdl-style-guide
+    rev: 3.35.0
+    hooks:
+      - id: vsg
+        args: [ --configuration=.vsg.yaml ]
+
+  # Verilog / SystemVerilog linting — upstream hook (Docker-backed)
+  - repo: https://github.com/verilator/verilator
+    rev: v5.048 # refreshed by `pre-commit autoupdate`
+    hooks:
+      - id: verilator
+        # Waivers are inherent to pre-commit's per-file linting, not real design defects:
+        args:
+          [
+            --lint-only,
+            -Wno-MODMISSING,
+            -Wno-TIMESCALEMOD,
+            -Wno-MULTITOP,
+            -Wno-MODDUP,
+          ]
+        exclude: ^fabulous/fabric_files/FABulous_project_template_common/Tile/include/.*_latchmap\.v$
+
+  # Verilog / SystemVerilog linting — upstream svlint static binary.
+  # scripts/svlint_wrapper.py downloads and caches the pinned release on first
+  # invocation, so no manual install is required.
+  - repo: local
+    hooks:
+      - id: svlint
+        name: svlint
+        description: Lint (System)Verilog with upstream svlint
+        language: script
+        entry: scripts/svlint_wrapper.py --config .svlint.toml
+        types_or: [ verilog, system-verilog ]

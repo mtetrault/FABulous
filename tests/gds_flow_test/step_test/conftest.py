@@ -1,4 +1,4 @@
-"""Fixtures fceor gds_generator_test tests."""
+"""Fixtures for gds_generator_test tests."""
 
 from decimal import Decimal
 
@@ -6,7 +6,7 @@ import pytest
 from librelane.config.config import Config
 from pytest_mock import MockerFixture
 
-from fabulous.fabric_generator.gds_generator.steps.tile_optimisation import OptMode
+from fabulous.fabric_generator.gds_generator.steps.tile_area_opt import OptMode
 
 
 @pytest.fixture(autouse=True)
@@ -35,9 +35,15 @@ def mock_config() -> Config:  # type: ignore[name-defined]
             "IGNORE_DEFAULT_DIE_AREA": False,
             "FABULOUS_OPTIMISATION_WIDTH_STEP_COUNT": 5,
             "FABULOUS_OPTIMISATION_HEIGHT_STEP_COUNT": 5,
+            "FABULOUS_BASE_OPTIMISATION_ITERATION_START": 15,
             "FABULOUS_IO_MIN_WIDTH": 1,
             "FABULOUS_IO_MIN_HEIGHT": 1,
             "FABULOUS_OPT_MODE": OptMode.FIND_MIN_WIDTH,
+            "RT_MAX_LAYER": "met2",
+            "VDD_NETS": ["VDD"],
+            "GND_NETS": ["VSS"],
+            "VDD_PIN": "VDD",
+            "GND_PIN": "VSS",
         }
     )
 

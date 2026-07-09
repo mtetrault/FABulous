@@ -3,14 +3,14 @@
 import json
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Union, cast
 
-import yaml
 from librelane.config.variable import Instance, Macro, Orientation, Variable
 from librelane.flows.classic import Classic
-from librelane.flows.flow import Flow
+from librelane.flows.flow import Flow, FlowException
 from librelane.logging.logger import err, info
 from librelane.state.state import State
+from librelane.steps.common_variables import io_layer_variables
 from librelane.steps.step import Step
 
 from fabulous.fabric_definition.fabric import Fabric
@@ -18,17 +18,24 @@ from fabulous.fabric_generator.gds_generator.flows.flow_define import (
     check_steps,
     physical_steps,
     prep_steps,
+    vhdl_prep_steps,
     write_out_steps,
 )
-from fabulous.fabric_generator.gds_generator.helper import get_pitch, round_up_decimal
+from fabulous.fabric_generator.gds_generator.helper import (
+    get_pitch,
+    round_up_decimal,
+)
 from fabulous.fabric_generator.gds_generator.steps.fabric_IO_placement import (
     FABulousFabricIOPlacement,
 )
 from fabulous.fabric_generator.gds_generator.steps.odb_connect_pdn import (
     FABulousPDN,
 )
+from fabulous.fabulous_settings import get_context
 
 subs = {
+    "OpenROAD.CutRows": None,
+    "OpenROAD.TapEndcapInsertion": None,
     # Disable STA
     "OpenROAD.STAPrePNR*": None,
     "OpenROAD.STAMidPNR*": None,
@@ -37,30 +44,50 @@ subs = {
     "Odb.CustomIOPlacement": FABulousFabricIOPlacement,
     # Power
     "OpenROAD.GeneratePDN": FABulousPDN,
+    # Skip cell placement (macro-only fabric has no std cells, and macros
+    # fill the die so CutRows produces zero rows; GP/DP would error on that).
+    "Odb.ApplyDEFTemplate": None,
+    "OpenROAD.GlobalPlacement": None,
+    "Odb.ManualGlobalPlacement": None,
+    "OpenROAD.DetailedPlacement": None,
+    "OpenROAD.RepairAntennas*": None,
+    "OpenROAD.Repair*": None,
+    "OpenROAD.Resizer*": None,
+    # It seems when we have no wires,
+    # OpenRCX won't write a spef file
+    "OpenROAD.RCX": None,
+    # No IR drop without a spef
+    "OpenROAD.IRDropReport": None,
 }
 
-configs = Classic.config_vars + [
-    Variable(
-        "FABULOUS_TILE_SPACING",
-        tuple[Decimal, Decimal],
-        "The spacing between tiles. (x_spacing, y_spacing)",
-        units="µm",
-        default=(0, 0),
-    ),
-    Variable(
-        "FABULOUS_HALO_SPACING",
-        tuple[Decimal, Decimal, Decimal, Decimal],
-        "The spacing around the fabric. [left, bottom, right, top]",
-        units="µm",
-        default=(0, 0, 0, 0),
-    ),
-    Variable(
-        "FABULOUS_SPEF_CORNERS",
-        list[str],
-        "The SPEF corners to use for the tile macros.",
-        default=["nom"],
-    ),
-]
+configs = (
+    Classic.config_vars
+    + [
+        Variable(
+            "FABULOUS_TILE_SPACING",
+            Union[Decimal, tuple[Decimal, Decimal]],  # noqa: UP007
+            "The spacing between tiles. Either a scalar (applied to both axes) "
+            "or (x_spacing, y_spacing).",
+            units="µm",
+            default=(0, 0),
+        ),
+        Variable(
+            "FABULOUS_HALO_SPACING",
+            Union[Decimal, tuple[Decimal, Decimal, Decimal, Decimal]],  # noqa: UP007
+            "The spacing around the fabric. Either a scalar (applied to all "
+            "four sides) or [left, bottom, right, top].",
+            units="µm",
+            default=(0, 0, 0, 0),
+        ),
+        Variable(
+            "FABULOUS_SPEF_CORNERS",
+            list[str],
+            "The SPEF corners to use for the tile macros.",
+            default=["nom"],
+        ),
+    ]
+    + io_layer_variables
+)
 
 
 @Flow.factory.register()
@@ -79,10 +106,15 @@ class FABulousFabricMacroFlow(Classic):
     Substitutions = subs
     config_vars = configs
 
+    # HDL source collection (Verilog defaults).
+    _hdl_files_config_key: str = "VERILOG_FILES"
+    _extra_synth_config: dict[str, object] = {}
+    _models_pack_first: bool = False
+
     def __init__(
         self,
         fabric: Fabric,
-        fabric_verilog_paths: list[Path],
+        fabric_hdl_paths: list[Path],
         tile_macro_dirs: dict[str, Path],
         *,
         base_config_path: Path | None = None,
@@ -92,69 +124,46 @@ class FABulousFabricMacroFlow(Classic):
         pdk: str | None = None,
         **custom_config_overrides: dict,
     ) -> None:
-        self.macros: dict[str, Macro] = {}
-        self.tile_sizes: dict[str, tuple[Decimal, Decimal]] = {}
         self.fabric = fabric
+        self.macros, self.tile_sizes = _build_macros(tile_macro_dirs)
 
-        for name, tile_macro_path in tile_macro_dirs.items():
-            die_area = json.loads(
-                (tile_macro_path / "metrics.json").read_text(encoding="utf-8")
-            ).get("design__die__bbox", None)
+        # The fabric-level VHDL top uses `work.my_package` from `models_pack`, so it
+        # must be analysed first by GHDL.
+        hdl_files: list[str] = []
+        models_pack = get_context().models_pack
+        if self._models_pack_first and models_pack:
+            hdl_files.append(str(models_pack.resolve()))
+        hdl_files += [str(i) for i in fabric_hdl_paths]
 
-            if die_area is None:
-                raise ValueError(f"metrics.json for {name} missing die bbox")
-            _, _, width, height = [Decimal(m) for m in die_area.split(" ")]
+        final_config = {
+            self._hdl_files_config_key: hdl_files,
+            "DESIGN_NAME": fabric.name,
+            **self._extra_synth_config,
+        }
 
-            spef_dict = {}
-            for i in (tile_macro_path / "spef").iterdir():
-                spef_dict[str(i.name)] = list(i.glob("*.spef"))
-
-            self.macros[name] = Macro(
-                gds=cast("list", [i for i in (tile_macro_path / "gds").glob("*.gds")]),
-                lef=cast(
-                    "list",
-                    [str(i) for i in (tile_macro_path / "lef").glob("*.lef")],
-                ),
-                vh=cast(
-                    "list", [str(i) for i in (tile_macro_path / "vh").glob("*.vh")]
-                ),
-                nl=cast(
-                    "list", [str(i) for i in (tile_macro_path / "nl").glob("*.nl.v")]
-                ),
-                pnl=cast(
-                    "list",
-                    [str(i) for i in (tile_macro_path / "pnl").glob("*.pnl.v")],
-                ),
-                spef=spef_dict,
-            )
-
-            self.tile_sizes[name] = (width, height)
-
-        final_config = {}
-        final_config["VERILOG_FILES"] = [str(i) for i in fabric_verilog_paths]
-        final_config["DESIGN_NAME"] = fabric.name
-        if base_config_path is not None:
-            final_config.update(
-                yaml.safe_load(base_config_path.read_text(encoding="utf-8"))
-            )
-
-        if config_override_path is not None:
-            final_config.update(
-                yaml.safe_load(config_override_path.read_text(encoding="utf-8"))
-            )
-        final_config.update(**custom_config_overrides)
         if design_dir is not None:
             final_design_dir = str(design_dir.resolve())
         else:
             macro_dir = self.fabric.fabric_dir.parent / "macro"
             macro_dir.mkdir(parents=True, exist_ok=True)
             final_design_dir = str(macro_dir)
+
+        configs = [
+            i
+            for i in [
+                final_config,
+                base_config_path,
+                config_override_path,
+                custom_config_overrides,
+            ]
+            if i is not None
+        ]
         super().__init__(
-            final_config,
+            configs,
             name=self.fabric.name,
             design_dir=final_design_dir,
             pdk=pdk,
-            pdk_root=str(pdk_root.resolve()),
+            pdk_root=str(pdk_root),
         )
 
     def _compute_row_and_column_sizes(
@@ -483,10 +492,14 @@ class FABulousFabricMacroFlow(Classic):
         tuple[State, list[Step]]
             Tuple of final state and list of executed steps.
         """
-        tile_spacing: tuple[Decimal, Decimal] = self.config["FABULOUS_TILE_SPACING"]
-        halo_spacing: tuple[Decimal, Decimal, Decimal, Decimal] = self.config[
-            "FABULOUS_HALO_SPACING"
-        ]
+        ts_raw = self.config["FABULOUS_TILE_SPACING"]
+        tile_spacing: tuple[Decimal, Decimal] = (
+            (ts_raw, ts_raw) if isinstance(ts_raw, Decimal) else ts_raw
+        )
+        hs_raw = self.config["FABULOUS_HALO_SPACING"]
+        halo_spacing: tuple[Decimal, Decimal, Decimal, Decimal] = (
+            (hs_raw, hs_raw, hs_raw, hs_raw) if isinstance(hs_raw, Decimal) else hs_raw
+        )
 
         # Get min_pitch_x/min_pitch_y from FP_TRACKS_INFO via helper.get_min_pitch
         pitch_x, pitch_y = get_pitch(self.config)
@@ -626,12 +639,91 @@ class FABulousFabricMacroFlow(Classic):
 
         info(f"Setting MACROS to {self.config['MACROS']}")
 
-        (final_state, steps) = super().run(initial_state, **kwargs)
+        return super().run(initial_state, **kwargs)
 
-        final_views_path = (Path() / "macro" / self.config["PDK"]).resolve()
-        info(f"Saving final views for FABulous to {final_views_path}")
-        final_state.save_snapshot(final_views_path)
 
-        info("Copying FABulous related files.")
+@Flow.factory.register()
+class FABulousFabricVHDLMacroFlow(FABulousFabricMacroFlow):
+    """Fabric stitching flow for a VHDL project.
 
-        return (final_state, steps)
+    Identical to `FABulousFabricMacroFlow` apart from the GHDL-based
+    synthesis/prep steps and reading the fabric-level `.vhdl` source.
+    `Substitutions` is re-declared because `SequentialFlow` clears a parent
+    flow's substitutions after applying them.
+    """
+
+    Steps = vhdl_prep_steps + physical_steps + write_out_steps + check_steps
+    Substitutions = subs
+
+    _hdl_files_config_key = "VHDL_FILES"
+    # `--latches`: `models_pack` defines a transparent latch primitive; GHDL errors
+    # on inferred latches by default (Verilog synthesis tolerates them).
+    _extra_synth_config = {"GHDL_ARGUMENTS": ["--std=08", "-fexplicit", "--latches"]}
+    _models_pack_first = True
+
+
+def _build_macros(
+    tile_macro_dirs: dict[str, Path],
+) -> tuple[dict[str, Macro], dict[str, tuple[Decimal, Decimal]]]:
+    """Build LibreLane macros and a size map from tile macro output directories."""
+    macros: dict[str, Macro] = {}
+    tile_sizes: dict[str, tuple[Decimal, Decimal]] = {}
+
+    for name, tile_macro_path in tile_macro_dirs.items():
+        metrics_path = tile_macro_path / "metrics.json"
+        if not metrics_path.is_file():
+            raise FlowException(
+                f"metrics.json not found under {tile_macro_path} for tile {name!r}"
+            )
+
+        die_area = json.loads(metrics_path.read_text(encoding="utf-8")).get(
+            "design__die__bbox"
+        )
+        if die_area is None:
+            raise FlowException(
+                f"metrics.json for {name!r} is missing design__die__bbox"
+            )
+        _, _, width, height = [Decimal(m) for m in die_area.split(" ")]
+
+        spef_dict: dict[str, list[Path]] = {}
+        spef_root = tile_macro_path / "spef"
+        if spef_root.is_dir():
+            for corner in spef_root.iterdir():
+                spef_dict[corner.name] = list(corner.glob("*.spef"))
+
+        macros[name] = Macro(
+            gds=cast("list", list((tile_macro_path / "gds").glob("*.gds"))),
+            lef=cast("list", [str(p) for p in (tile_macro_path / "lef").glob("*.lef")]),
+            vh=cast("list", [str(p) for p in (tile_macro_path / "vh").glob("*.vh")]),
+            nl=cast("list", [str(p) for p in (tile_macro_path / "nl").glob("*.nl.v")]),
+            pnl=cast(
+                "list", [str(p) for p in (tile_macro_path / "pnl").glob("*.pnl.v")]
+            ),
+            spef=spef_dict,
+        )
+        tile_sizes[name] = (width, height)
+
+    return macros, tile_sizes
+
+
+def _collect_fabric_verilog(fabric_dir: Path, fabric_name: str) -> list[Path]:
+    """Best-effort search for the fabric-level Verilog when config omits it."""
+    candidates = [
+        fabric_dir / f"{fabric_name}.v",
+        fabric_dir / "fabric.v",
+        *fabric_dir.glob("*.v"),
+    ]
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for candidate in candidates:
+        path = candidate.resolve()
+        if path.is_file() and path not in seen:
+            seen.add(path)
+            result.append(path)
+    if not result:
+        raise FlowException(
+            f"No fabric Verilog found under {fabric_dir}. Either set "
+            "VERILOG_FILES in config.yaml or place the fabric Verilog "
+            f"(e.g. {fabric_name}.v) alongside fabric.csv."
+        )
+    return result

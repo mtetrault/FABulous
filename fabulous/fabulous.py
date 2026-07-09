@@ -4,17 +4,21 @@ This module provides the main entry point for the FABulous FPGA framework comman
 interface. It handles argument parsing, project setup, and CLI initialization.
 """
 
+import os
 import platform
+import shutil
 import sys
+from enum import StrEnum
 from importlib.metadata import version
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Annotated
 
-import click
 import typer
 from loguru import logger
 from packaging.version import Version
 from pydantic import ValidationError
+from typer.main import get_command
 
 from fabulous.custom_exception import PipelineCommandError
 from fabulous.fabric_definition.define import HDLType
@@ -44,6 +48,12 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+
+install_app = typer.Typer(
+    help="Install external tools and dependencies.",
+    no_args_is_help=True,
+)
+app.add_typer(install_app, name="install")
 
 
 def version_callback(value: bool) -> None:
@@ -84,6 +94,28 @@ WriterType = Annotated[
 ]
 
 ForceType = Annotated[bool, typer.Option("--force", help="Enable force mode")]
+
+
+class NixShell(StrEnum):
+    """Shell types supported by the nix development environment."""
+
+    BASH = "bash"
+    FISH = "fish"
+    ZSH = "zsh"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "NixShell":
+        logger.warning(
+            f"Unsupported shell '{value}', falling back to '{cls.BASH.value}'."
+        )
+        return cls.BASH
+
+
+class ScriptType(StrEnum):
+    """Script execution modes supported by the ``script`` command."""
+
+    FABULOUS = "fabulous"
+    TCL = "tcl"
 
 
 GLOBAL_FLAGS = {
@@ -214,7 +246,8 @@ def common_options(
 
     subcommand = ctx.invoked_subcommand
     if subcommand and (
-        subcommand.startswith("install") or subcommand in {"create-project", "c"}
+        subcommand.startswith("install")
+        or subcommand in {"create-project", "c", "nix-env"}
     ):
         return
 
@@ -276,7 +309,7 @@ def create_project_cmd(
     logger.info(f"FABulous project created successfully at {project_dir}")
 
 
-@app.command("install-oss-cad-suite")
+@install_app.command("oss-cad-suite")
 def install_oss_cad_suite_cmd(
     directory: Annotated[
         Path | None, typer.Argument(help="Directory to install oss-cad-suite in")
@@ -295,7 +328,7 @@ def install_oss_cad_suite_cmd(
     logger.info(f"oss-cad-suite installed successfully at {directory}")
 
 
-@app.command("install-fabulator")
+@install_app.command("fabulator")
 def install_fabulator_cmd(
     directory: Annotated[
         Path | None, typer.Argument(help="Directory to install FABulator in")
@@ -315,7 +348,7 @@ def install_fabulator_cmd(
     logger.info(f"FABulator installed successfully at {directory}")
 
 
-@app.command("install-nix")
+@install_app.command("nix")
 def install_nix_cmd() -> None:
     """Install Nix."""
     import shutil
@@ -355,6 +388,92 @@ def install_nix_cmd() -> None:
         raise typer.Exit(1) from None
 
 
+@app.command("nix-env")
+def nix_env_cmd(
+    flake_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--flake-dir",
+            "-f",
+            help="Directory containing flake.nix. Defaults to bundled nix files.",
+        ),
+    ] = None,
+    shell: Annotated[
+        NixShell | None,
+        typer.Option(
+            "--shell",
+            "-s",
+            help=(
+                "Shell to use (bash, fish, zsh). "
+                "Auto-detected from $SHELL if not specified."
+            ),
+            case_sensitive=False,
+        ),
+    ] = None,
+    no_check: Annotated[
+        bool,
+        typer.Option(
+            "--no-check",
+            help="Skip EDA tool verification on entry.",
+        ),
+    ] = False,
+) -> None:
+    """Drop into the Nix development environment with EDA tool verification.
+
+    Enters a Nix dev shell and verifies that yosys, nextpnr, and openroad are installed
+    and sourced from the Nix store. Use --no-check to skip the verification step.
+    """
+    # Check nix is installed
+    if not shutil.which("nix"):
+        logger.error("Nix is not installed. Run `FABulous install-nix` to install it.")
+        raise typer.Exit(1)
+
+    # Resolve flake directory
+    if flake_dir is not None:
+        resolved_flake_dir = flake_dir.resolve()
+        repo_root = None
+    else:
+        with as_file(files("fabulous_nix").joinpath("flake.nix")) as flake_file:
+            resolved_flake_dir = flake_file.resolve().parent
+        repo_root = resolved_flake_dir.parent
+
+    if not (resolved_flake_dir / "flake.nix").exists():
+        logger.error(
+            f"flake.nix not found in {resolved_flake_dir}. "
+            "Use --flake-dir to specify the directory containing flake.nix."
+        )
+        raise typer.Exit(1)
+
+    # Detect shell (precedence: CLI option > FAB_NIX_SHELL setting > $SHELL)
+    if shell is None:
+        configured_shell = get_context().nix_shell
+        selected_shell = (
+            configured_shell or Path(os.environ.get("SHELL", "/bin/bash")).name
+        )
+        shell = NixShell(selected_shell)
+
+    # Tell the nix-env shellHook which shell to exec into after setup.
+    # The shellHook handles PATH setup, venv deactivation, and for fish
+    # uses -C to re-prepend nix paths after config (nix-darwin#1607).
+    logger.info(f"Entering Nix environment with {shell.value} shell...")
+
+    env = os.environ.copy()
+    env["FAB_NIX_SHELL"] = shell.value
+    env["FAB_NIX_NO_CHECK"] = str(int(no_check or get_context().nix_no_check))
+    if repo_root is not None:
+        env["REPO_ROOT"] = str(repo_root)
+
+    os.execvpe(
+        "nix",
+        [
+            "nix",
+            "develop",
+            f"path:{resolved_flake_dir}#nix-env",
+        ],
+        env,
+    )
+
+
 @app.command("update-project-version")
 def update_project_version_cmd() -> None:
     """Update project version to match package version."""
@@ -379,14 +498,14 @@ def script_cmd(
         ),
     ],
     script_type: Annotated[
-        str,
+        ScriptType,
         typer.Option(
             "--type",
             "-t",
             help="Override script type detection",
-            click_type=click.Choice(["fabulous", "tcl"]),
+            case_sensitive=False,
         ),
-    ] = "tcl",
+    ] = ScriptType.TCL,
     force: ForceType = False,
 ) -> None:
     """Execute a script file with auto-detection of script type.
@@ -589,7 +708,11 @@ def main() -> None:
             app()
         sys.argv = reorder_options(sys.argv)
         for i in sys.argv[1:]:
-            if i in [i.name for i in app.registered_commands] or i == "--help":
+            if (
+                i in [i.name for i in app.registered_commands]
+                or i in [g.name for g in app.registered_groups if g.name]
+                or i == "--help"
+            ):
                 app()
                 break
         else:
@@ -770,7 +893,7 @@ def convert_legacy_args_with_deprecation_warning() -> None:
         "Please migrate to the new typer-based commands:\n"
         r"  FABulous --createProject \<dir> → FABulous create-project \<dir>"
         "\n"
-        r"  FABulous --install_oss_cad_suite → FABulous install-oss-cad-suite \<dir>"
+        r"  FABulous --install_oss_cad_suite → FABulous install oss-cad-suite \<dir>"
         "\n"
         r"  FABulous \<project_dir> --commands \<cmd> → FABulous -p \<project_dir> run "
         r"\<cmd>"
@@ -793,12 +916,12 @@ def convert_legacy_args_with_deprecation_warning() -> None:
         sys.exit(0)
 
     if args.install_oss_cad_suite:
-        # Convert to: FABulous install-oss-cad-suite <directory> [options]
+        # Convert to: FABulous install oss-cad-suite <directory> [options]
         install_oss_cad_suite_cmd(project_dir)
         sys.exit(0)
 
     common_options(
-        ctx=typer.Context(click.Command("legacy_args")),
+        ctx=typer.Context(get_command(app)),
         project_dir=project_dir if args.project_dir else None,
         verbose=args.verbose,
         debug=args.debug,

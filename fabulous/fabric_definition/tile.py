@@ -1,6 +1,5 @@
 """Tile class definition for FPGA fabric representation."""
 
-import itertools
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -10,6 +9,7 @@ from fabulous.fabric_definition.bel import Bel
 from fabulous.fabric_definition.define import IO, Direction, PinSortMode, Side
 from fabulous.fabric_definition.gen_io import Gen_IO
 from fabulous.fabric_definition.port import Port
+from fabulous.fabric_definition.switch_matrix import SwitchMatrix
 from fabulous.fabric_definition.wire import Wire
 
 if TYPE_CHECKING:
@@ -259,20 +259,39 @@ class Tile:
             if p.wireDirection == Direction.WEST and p.name != "NULL" and p.inOut == io
         ]
 
+    def get_sjump_ports(self) -> list[Port]:
+        """Get all ports with SJUMP wire direction.
+
+        SJUMP ports are one-way connections between the tile and a supertile
+        BEL: OUTPUT ports exit toward the supertile switch matrix, INPUT ports
+        receive results back. Both directions are returned; callers filter by
+        `inOut` as needed.
+
+        Returns
+        -------
+        list[Port]
+            List of SJUMP-direction ports, excluding NULL ports.
+        """
+        return [
+            p
+            for p in self.portsInfo
+            if p.wireDirection == Direction.SJUMP and p.name != "NULL"
+        ]
+
     def getTileInputNames(self) -> list[str]:
         """Get all input port destination names for the tile.
 
         Returns
         -------
         list[str]
-            List of destination names for input ports, excluding NULL and
-            JUMP direction ports.
+            List of destination names for input ports, excluding NULL, JUMP,
+            and SJUMP direction ports.
         """
         return [
             p.destinationName
             for p in self.portsInfo
             if p.destinationName != "NULL"
-            and p.wireDirection != Direction.JUMP
+            and p.wireDirection not in (Direction.JUMP, Direction.SJUMP)
             and p.inOut == IO.INPUT
         ]
 
@@ -282,16 +301,27 @@ class Tile:
         Returns
         -------
         list[str]
-            List of source names for output ports, excluding NULL and
-            JUMP direction ports.
+            List of source names for output ports, excluding NULL, JUMP, and
+            SJUMP direction ports.
         """
         return [
             p.sourceName
             for p in self.portsInfo
             if p.sourceName != "NULL"
-            and p.wireDirection != Direction.JUMP
+            and p.wireDirection not in (Direction.JUMP, Direction.SJUMP)
             and p.inOut == IO.OUTPUT
         ]
+
+    @property
+    def switch_matrix(self) -> SwitchMatrix:
+        """Get the tile's switch matrix as a fabric-model construct.
+
+        Returns
+        -------
+        SwitchMatrix
+            The switch matrix wrapping this tile's matrix file and config bits.
+        """
+        return SwitchMatrix(self.name, self.matrixDir, self.matrixConfigBits)
 
     @property
     def globalConfigBits(self) -> int:
@@ -313,7 +343,7 @@ class Tile:
         return ret
 
     def get_port_count(self, side: Side) -> int:
-        """Count total number of expanded ports on a given side of the tile.
+        """Count total number of expanded physical pins on a given side of the tile.
 
         Parameters
         ----------
@@ -325,87 +355,74 @@ class Tile:
         int
             Total number of expanded ports on the given side.
         """
-        ports = [p for p in self.portsInfo if p.sideOfTile == side and p.name != "NULL"]
-        return len(
-            list(
-                itertools.chain.from_iterable(
-                    [
-                        list(itertools.chain.from_iterable(p.expandPortInfo("all")))
-                        for p in ports
-                    ]
-                )
-            )
-        )
+        total = 0
+        for p in self.portsInfo:
+            if p.sideOfTile != side or p.name == "NULL":
+                continue
+            inputs, outputs = p.expandPortInfo("all")
+            if p.name == p.sourceName:
+                total += len(inputs)
+            elif p.name == p.destinationName:
+                total += len(outputs)
+
+        return total
 
     def get_min_die_area(
         self,
         x_pitch: Decimal,
         y_pitch: Decimal,
-        x_pin_thickness_mult: Decimal,
-        y_pin_thickness_mult: Decimal,
-        x_spacing: Decimal,
-        y_spacing: Decimal,
+        x_pin_thickness_mult: Decimal = Decimal(1),
+        y_pin_thickness_mult: Decimal = Decimal(1),
         frame_data_width: int = 32,
         frame_strobe_width: int = 20,
+        edge_offset: int = 2,
     ) -> tuple[Decimal, Decimal]:
-        """Calculate minimum tile dimensions based on IO pin density.
+        """Calculate minimum tile dimensions based on IO pin track requirements.
 
-        For this tile, calculates the minimum physical width and height
-        required to accommodate all IO pins at the PDK's track pitch.
+        The IO pin placer distributes pins across available tracks on each
+        tile edge. Each pin occupies `thickness_mult` consecutive tracks,
+        and `edge_offset` tracks are reserved at the start of the tile
+        (see `tile_io_place.allocate_tracks`).
+
+        The minimum number of tracks on a side is therefore::
+
+            required_tracks = pin_count * thickness_mult + edge_offset
+
+        And the minimum physical dimension is::
+
+            min_dim = required_tracks * pitch
 
         Parameters
         ----------
         x_pitch : Decimal
-            Horizontal pitch between tracks (DBU).
+            Vertical-layer track pitch (for north/south pins).
         y_pitch : Decimal
-            Vertical pitch between tracks (DBU).
+            Horizontal-layer track pitch (for east/west pins).
         x_pin_thickness_mult : Decimal
-            Pin thickness multiplier in the horizontal direction.
+            Number of tracks each north/south pin spans, by default 1.
         y_pin_thickness_mult : Decimal
-            Pin thickness multiplier in the vertical direction.
-        x_spacing : Decimal
-            Pin spacing in the horizontal direction (DBU).
-        y_spacing : Decimal
-            Pin spacing in the vertical direction (DBU).
+            Number of tracks each east/west pin spans, by default 1.
         frame_data_width : int, optional
             Frame data width, by default 32.
         frame_strobe_width : int, optional
             Frame strobe width, by default 20.
+        edge_offset : int, optional
+            Reserved tracks at tile edge, by default 2.
 
         Returns
         -------
         tuple[Decimal, Decimal]
-            (min_width, min_height) where:
-            - min_width: minimum width needed for north/south edge IO pins
-            - min_height: minimum height needed for west/east edge IO pins
-
-        Notes
-        -----
-        The minimum dimensions are calculated as:
-        - min_width = max(north_pins, south_pins) * x_pitch
-        - min_height = max(west_pins, east_pins) * y_pitch
-
-        These constraints prevent the NLP solver from suggesting dimensions
-        that are physically impossible due to IO pin spacing requirements.
+            (min_width, min_height)
         """
-        # Count ports on each physical side
         north_ports = self.get_port_count(Side.NORTH)
         south_ports = self.get_port_count(Side.SOUTH)
         west_ports = self.get_port_count(Side.WEST)
         east_ports = self.get_port_count(Side.EAST)
 
-        # Min width constrained by north/south edges
         x_io_count = Decimal(max(north_ports, south_ports) + frame_strobe_width)
-        min_width_io = (
-            x_io_count * (x_pitch * x_pin_thickness_mult)
-            + x_spacing * x_io_count
-            + 2 * x_spacing
-        )
-        # Min height constrained by west/east edges
+        min_width_io = (x_io_count * x_pin_thickness_mult + edge_offset) * x_pitch
+
         y_io_count = Decimal(max(west_ports, east_ports) + frame_data_width)
-        min_height_io = (
-            y_io_count * (y_pitch * y_pin_thickness_mult)
-            + y_spacing * y_io_count
-            + 2 * y_spacing
-        )
+        min_height_io = (y_io_count * y_pin_thickness_mult + edge_offset) * y_pitch
+
         return min_width_io, min_height_io

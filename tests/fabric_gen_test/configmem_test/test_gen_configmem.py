@@ -15,10 +15,11 @@ from fabulous.fabric_definition.fabric import Fabric
 from fabulous.fabric_definition.tile import Tile
 from fabulous.fabric_generator.code_generator.code_generator import CodeGenerator
 from fabulous.fabric_generator.gen_fabric.gen_configmem import (
+    build_super_tile_config_mem_csv,
     generateConfigMem,
     generateConfigMemInit,
 )
-from tests.fabric_gen_test.conftest import verify_csv_content
+from tests.fabric_gen_test.conftest import create_config_csv, verify_csv_content
 
 
 def _check_fabric_capacity(
@@ -39,7 +40,12 @@ def _expect_capacity_error(
 ) -> None:
     """Test that capacity error is raised with meaningful message."""
     with pytest.raises((ValueError, RuntimeError, AssertionError)) as exc_info:
-        generateConfigMemInit(fabric_config, output_file, tile_config_bits)
+        generateConfigMemInit(
+            output_file,
+            tile_config_bits,
+            frame_bits_per_row=fabric_config.frameBitsPerRow,
+            max_frame_per_col=fabric_config.maxFramesPerCol,
+        )
     # Verify that the error message is meaningful
     error_msg = str(exc_info.value).lower()
     assert "exceed fabric capacity" in error_msg
@@ -66,7 +72,12 @@ class TestGenerateConfigMemInit:
         if tile_config_bits == 0:
             return
 
-        generateConfigMemInit(fabric_config, output_file, tile_config_bits)
+        generateConfigMemInit(
+            output_file,
+            tile_config_bits,
+            frame_bits_per_row=fabric_config.frameBitsPerRow,
+            max_frame_per_col=fabric_config.maxFramesPerCol,
+        )
         rows = verify_csv_content(
             output_file, expected_rows=fabric_config.maxFramesPerCol
         )
@@ -92,12 +103,20 @@ class TestGenerateConfigMemInit:
         if not has_capacity:
             with pytest.raises((ValueError, RuntimeError, AssertionError)):
                 generateConfigMemInit(
-                    fabric_config, tmp_path / "should_fail.csv", tile_config_bits
+                    tmp_path / "should_fail.csv",
+                    tile_config_bits,
+                    frame_bits_per_row=fabric_config.frameBitsPerRow,
+                    max_frame_per_col=fabric_config.maxFramesPerCol,
                 )
             return
 
         output_file = tmp_path / f"bitmask_{fabric_config.name}_{tile_config.name}.csv"
-        generateConfigMemInit(fabric_config, output_file, tile_config_bits)
+        generateConfigMemInit(
+            output_file,
+            tile_config_bits,
+            frame_bits_per_row=fabric_config.frameBitsPerRow,
+            max_frame_per_col=fabric_config.maxFramesPerCol,
+        )
 
         rows = verify_csv_content(
             output_file, expected_rows=fabric_config.maxFramesPerCol
@@ -134,14 +153,22 @@ class TestGenerateConfigMemInit:
         if not has_capacity:
             with pytest.raises((ValueError, RuntimeError, AssertionError)):
                 generateConfigMemInit(
-                    fabric_config, tmp_path / "should_fail.csv", tile_config_bits
+                    tmp_path / "should_fail.csv",
+                    tile_config_bits,
+                    frame_bits_per_row=fabric_config.frameBitsPerRow,
+                    max_frame_per_col=fabric_config.maxFramesPerCol,
                 )
             return
 
         output_file = (
             tmp_path / f"allocation_{fabric_config.name}_{tile_config.name}.csv"
         )
-        generateConfigMemInit(fabric_config, output_file, tile_config_bits)
+        generateConfigMemInit(
+            output_file,
+            tile_config_bits,
+            frame_bits_per_row=fabric_config.frameBitsPerRow,
+            max_frame_per_col=fabric_config.maxFramesPerCol,
+        )
 
         rows = verify_csv_content(
             output_file, expected_rows=fabric_config.maxFramesPerCol
@@ -181,10 +208,20 @@ class TestGenerateConfigMemInit:
         # Expect error when fabric can't accommodate the config bits
         if not has_capacity:
             with pytest.raises((ValueError, RuntimeError, AssertionError)):
-                generateConfigMemInit(default_fabric, output_file, tile_config_bits)
+                generateConfigMemInit(
+                    output_file,
+                    tile_config_bits,
+                    frame_bits_per_row=default_fabric.frameBitsPerRow,
+                    max_frame_per_col=default_fabric.maxFramesPerCol,
+                )
             return
 
-        generateConfigMemInit(default_fabric, output_file, tile_config_bits)
+        generateConfigMemInit(
+            output_file,
+            tile_config_bits,
+            frame_bits_per_row=default_fabric.frameBitsPerRow,
+            max_frame_per_col=default_fabric.maxFramesPerCol,
+        )
 
         rows = verify_csv_content(output_file)
 
@@ -210,7 +247,7 @@ class TestGeneratedConfigMemRTL:
         tile_config: Tile,
         code_generator_factory: Callable[..., CodeGenerator],
     ) -> None:
-        """Test generateConfigMem creates RTL with right number of LHQD1."""
+        """Test generateConfigMem creates RTL with right number of config_latch."""
         # Create config CSV file path
         config_csv = tmp_path / f"{tile_config.name}_configMem.csv"
 
@@ -222,11 +259,25 @@ class TestGeneratedConfigMemRTL:
             fabric_config, tile_config.globalConfigBits
         )
         if not has_capacity and tile_config.globalConfigBits > 0:
-            with pytest.raises(ValueError, match="adjust the tile configuration."):
-                generateConfigMem(writer, fabric_config, tile_config, config_csv)
+            with pytest.raises(ValueError, match="adjust the configuration."):
+                generateConfigMem(
+                    writer,
+                    tile_config.name,
+                    tile_config.globalConfigBits,
+                    config_csv,
+                    frame_bits_per_row=fabric_config.frameBitsPerRow,
+                    max_frame_per_col=fabric_config.maxFramesPerCol,
+                )
             return
 
-        generateConfigMem(writer, fabric_config, tile_config, config_csv)
+        generateConfigMem(
+            writer,
+            tile_config.name,
+            tile_config.globalConfigBits,
+            config_csv,
+            frame_bits_per_row=fabric_config.frameBitsPerRow,
+            max_frame_per_col=fabric_config.maxFramesPerCol,
+        )
 
         # Verify output file was created and contains expected content
         output_file = writer.outFileName
@@ -238,11 +289,11 @@ class TestGeneratedConfigMemRTL:
         # Read and verify the generated content
         content = output_file.read_text()
 
-        # Count actual LHQD1 instantiations in content
-        actual_instantiations = content.count("LHQD1")
+        # Count actual config_latch instantiations in content
+        actual_instantiations = content.count("config_latch")
         assert actual_instantiations == tile_config.globalConfigBits, (
-            f"Expected {tile_config.globalConfigBits} LHQD1 instantiations, found"
-            f" {actual_instantiations}"
+            f"Expected {tile_config.globalConfigBits} config_latch instantiations, "
+            f"found {actual_instantiations}"
         )
 
     def test_configmem_rtl_maps_frame_signals_to_config_bits_correctly(
@@ -273,7 +324,14 @@ class TestGeneratedConfigMemRTL:
         mock_parse.return_value = config_memlist_data
 
         # Generate the ConfigMem RTL
-        generateConfigMem(writer, default_fabric, default_tile, csv_path)
+        generateConfigMem(
+            writer,
+            default_tile.name,
+            default_tile.globalConfigBits,
+            csv_path,
+            frame_bits_per_row=default_fabric.frameBitsPerRow,
+            max_frame_per_col=default_fabric.maxFramesPerCol,
+        )
 
         # Read the generated RTL
         rtl_content = writer.outFileName.read_text()
@@ -296,12 +354,13 @@ class TestGeneratedConfigMemRTL:
                     frame_strobe_bit = frame_idx
                     expected_config_bit = expected_config_bits[config_bit_counter]
 
-                    # Verify the LHQD1 instantiation exists with correct connections
+                    # Verify the config_latch instantiation exists with correct
+                    # connections
                     expected_inst_name = (
                         f"Inst_{config_mem.frameName}_bit{frame_data_bit}"
                     )
                     assert expected_inst_name in rtl_content, (
-                        f"Missing LHQD1 instantiation: {expected_inst_name}"
+                        f"Missing config_latch instantiation: {expected_inst_name}"
                     )
 
                     # Verify the port connections
@@ -316,3 +375,102 @@ class TestGeneratedConfigMemRTL:
                     )
 
                     config_bit_counter += 1
+
+
+def _write_configmem_csv(path: Path, masks: list[str], ranges: list[str]) -> None:
+    """Write a minimal ConfigMem CSV with the given per-frame masks and ranges."""
+    create_config_csv(
+        path,
+        [
+            {
+                "frame_name": f"frame{i}",
+                "frame_index": i,
+                "bits_used_in_frame": mask.count("1"),
+                "used_bits_mask": mask,
+                "ConfigBits_ranges": rng,
+            }
+            for i, (mask, rng) in enumerate(zip(masks, ranges, strict=True))
+        ],
+    )
+
+
+class TestSuperTileConfigMemReuse:
+    """`build_super_tile_config_mem_csv` reuses a valid existing CSV, else regen.
+
+    Master tile has 4 frames of 4 bits each (tiny, for readability). Frame 0 uses
+    its top two bits (`1100`), leaving the rest free for the supertile.
+    """
+
+    FRAME_BITS = 4
+    MAX_FRAMES = 4
+    MASTER_MASKS = ["1100", "0000", "0000", "0000"]
+    MASTER_RANGES = ["1:0", "# NULL", "# NULL", "# NULL"]
+
+    def _master(self, tmp_path: Path) -> Path:
+        master = tmp_path / "DSP_bot_ConfigMem.csv"
+        _write_configmem_csv(master, self.MASTER_MASKS, self.MASTER_RANGES)
+        return master
+
+    def _build(self, tmp_path: Path, out: Path, bits: int = 2) -> None:
+        build_super_tile_config_mem_csv(
+            self._master(tmp_path),
+            bits,
+            out,
+            frame_bits_per_row=self.FRAME_BITS,
+            max_frames_per_col=self.MAX_FRAMES,
+        )
+
+    def test_fresh_generation_when_absent(self, tmp_path: Path) -> None:
+        out = tmp_path / "DSP_ConfigMem.csv"
+        self._build(tmp_path, out)
+        # The two supertile bits land in master frame 0's free (low) slots.
+        masks = _read_masks(out)
+        assert sum(m.count("1") for m in masks.values()) == 2
+        # No bit overlaps the master's used top two bits.
+        assert all(
+            not (a == "1" and b == "1")
+            for a, b in zip(masks[0], self.MASTER_MASKS[0], strict=True)
+        )
+
+    def test_existing_valid_csv_is_reused(self, tmp_path: Path) -> None:
+        out = tmp_path / "DSP_ConfigMem.csv"
+        # A valid supertile CSV using the master's free low bits, disjoint from it.
+        _write_configmem_csv(
+            out, ["0011", "0000", "0000", "0000"], ["0;1", "# NULL", "# NULL", "# NULL"]
+        )
+        before = out.read_text()
+        self._build(tmp_path, out)
+        assert out.read_text() == before  # reused, not regenerated
+
+    @pytest.mark.parametrize(
+        ("masks", "ranges", "error_match"),
+        [
+            # Bit 0 (MSB) is used by the master (1100) -> conflict.
+            pytest.param(
+                ["1010", "0000", "0000", "0000"],
+                ["0;1", "# NULL", "# NULL", "# NULL"],
+                "conflicts with the master",
+                id="conflict_with_master",
+            ),
+            # Only one used bit, but the supertile needs two.
+            pytest.param(
+                ["0001", "0000", "0000", "0000"],
+                ["0", "# NULL", "# NULL", "# NULL"],
+                "needs 2",
+                id="stale_bit_count",
+            ),
+        ],
+    )
+    def test_invalid_existing_csv_raises(
+        self, tmp_path: Path, masks: list[str], ranges: list[str], error_match: str
+    ) -> None:
+        out = tmp_path / "DSP_ConfigMem.csv"
+        _write_configmem_csv(out, masks, ranges)
+        with pytest.raises(ValueError, match=error_match):
+            self._build(tmp_path, out, bits=2)
+
+
+def _read_masks(path: Path) -> dict[int, str]:
+    """Read a ConfigMem CSV into `{frame_index: used_bits_mask}` (no underscores)."""
+    rows = verify_csv_content(path)
+    return {int(r["frame_index"]): r["used_bits_mask"].replace("_", "") for r in rows}

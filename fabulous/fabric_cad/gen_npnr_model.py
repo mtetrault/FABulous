@@ -10,19 +10,27 @@ placement and routing for user designs.
 """
 
 import string
+from pathlib import Path
 
 from fabulous.custom_exception import InvalidFileType, InvalidState
+from fabulous.fabric_cad.timing_model.FABulous_timing_model_interface import (
+    FABulousTimingModelInterface,
+)
 from fabulous.fabric_definition.fabric import Fabric
 from fabulous.fabric_generator.parser.parse_switchmatrix import parseList, parseMatrix
 
 
-def genNextpnrModel(fabric: Fabric) -> tuple[str, str, str, str]:
+def genNextpnrModel(
+    fabric: Fabric, delay_model: FABulousTimingModelInterface = None
+) -> tuple[str, str, str, str]:
     """Generate the fabric's nextpnr model.
 
     Parameters
     ----------
     fabric : Fabric
         Fabric object containing tile information.
+    delay_model : FABulousTimingModelInterface, optional
+        Timing model interface to provide delay information, by default None.
 
     Returns
     -------
@@ -61,14 +69,22 @@ def genNextpnrModel(fabric: Fabric) -> tuple[str, str, str, str]:
                 connection = parseMatrix(tile.matrixDir, tile.name)
                 for source, sinkList in connection.items():
                     for sink in sinkList:
+                        # This delay is just arbitrary
+                        delay: float = 8
+                        if delay_model is not None:
+                            delay = delay_model.pip_delay(tile.name, sink, source)
                         pipStr.append(
-                            f"X{x}Y{y},{sink},X{x}Y{y},{source},{8},{sink}.{source}"
+                            f"X{x}Y{y},{sink},X{x}Y{y},{source},{delay},{sink}.{source}"
                         )
             elif tile.matrixDir.suffix == ".list":
                 connection = parseList(tile.matrixDir)
                 for source, sink in connection:
+                    # This delay is just arbitrary
+                    delay: float = 8
+                    if delay_model is not None:
+                        delay = delay_model.pip_delay(tile.name, sink, source)
                     pipStr.append(
-                        f"X{x}Y{y},{sink},X{x}Y{y},{source},{8},{sink}.{source}"
+                        f"X{x}Y{y},{sink},X{x}Y{y},{source},{delay},{sink}.{source}"
                     )
             else:
                 raise InvalidFileType(
@@ -87,10 +103,19 @@ def genNextpnrModel(fabric: Fabric) -> tuple[str, str, str, str]:
                         f"X{xDst}Y{yDst}. "
                         "Please check your tile CSV file for unmatching wires/offsets!"
                     )
+
+                # This delay is just arbitrary
+                delay: float = 8
+                if delay_model is not None:
+                    delay = delay_model.pip_delay(
+                        tile.name,
+                        wire.source,
+                        wire.destination,
+                    )
                 pipStr.append(
                     f"X{x}Y{y},{wire.source},"
                     f"X{x + wire.xOffset}Y{y + wire.yOffset},{wire.destination},"
-                    f"{8},"
+                    f"{delay},"
                     f"{wire.source}.{wire.destination}"
                 )
 
@@ -144,9 +169,85 @@ def genNextpnrModel(fabric: Fabric) -> tuple[str, str, str, str]:
                 if bel.withUserCLK:
                     belv2Str.append("GlobalClk")
                 belv2Str.append("BelEnd")
+
+    # Supertile BEL and switch-matrix PIP emission.
+    # SJUMP PIPs live in tile.wireList (added by Fabric.__post_init__) and are
+    # already emitted by the per-tile loop above.
+    for base_fx, base_fy, superTile in fabric.iter_super_tile_placements():
+        if not superTile.bels and superTile.supertile_matrix_dir is None:
+            continue
+
+        tx_local, ty_local = superTile.get_master_tile_coords()
+        ftx = base_fx + tx_local
+        fty = base_fy + ty_local
+
+        bel_offset = len(fabric.tile[fty][ftx].bels)
+        belStr.append(f"#SuperTile_{superTile.name}_X{ftx}Y{fty}")
+        belv2Str.append(f"#SuperTile_{superTile.name}_X{ftx}Y{fty}")
+        for i, bel in enumerate(superTile.bels):
+            letter = string.ascii_uppercase[bel_offset + i]
+            cType = bel.name
+            belPort = bel.inputs + bel.outputs
+            belStr.append(
+                f"X{ftx}Y{fty},X{ftx},Y{fty},{letter},{cType},{','.join(belPort)}"
+            )
+            if bel.externalInput or bel.externalOutput:
+                constrainStr.append(
+                    f"set_io Tile_X{ftx}Y{fty}_{letter} Tile_X{ftx}Y{fty}.{letter}"
+                )
+            belv2Str.append(f"BelBegin,X{ftx}Y{fty},{letter},{cType},{bel.prefix}")
+            for inp in bel.inputs:
+                belv2Str.append(f"I,{inp.removeprefix(bel.prefix)},X{ftx}Y{fty}.{inp}")
+            for outp in bel.outputs:
+                belv2Str.append(
+                    f"O,{outp.removeprefix(bel.prefix)},X{ftx}Y{fty}.{outp}"
+                )
+            for feat, _cfg in sorted(bel.belFeatureMap.items(), key=lambda x: x[0]):
+                belv2Str.append(f"CFG,{feat}")
+            if bel.withUserCLK:
+                belv2Str.append("GlobalClk")
+            belv2Str.append("BelEnd")
+
+        if superTile.supertile_matrix_dir is not None:
+            mat_path = superTile.supertile_matrix_dir
+            if mat_path.suffix == ".list":
+                sm_connections: dict[str, list[str]] = {}
+                for dest, src in parseList(mat_path):
+                    sm_connections.setdefault(dest, []).append(src)
+            else:
+                sm_connections = parseMatrix(mat_path, superTile.name)
+            for sink, sources in sm_connections.items():
+                for src in sources:
+                    delay: float = 8
+                    if delay_model is not None:
+                        delay = delay_model.pip_delay(superTile.name, sink, src)
+                    pipStr.append(
+                        f"X{ftx}Y{fty},{src},X{ftx}Y{fty},{sink},{delay},{src}.{sink}"
+                    )
+
     return (
         "\n".join(pipStr),
         "\n".join(belStr),
         "\n".join(belv2Str),
         "\n".join(constrainStr),
     )
+
+
+def writeNextpnrPipFile(
+    fabric: Fabric,
+    outputFile: Path,
+    delay_model: FABulousTimingModelInterface = None,
+) -> None:
+    """Write the nextpnr pip file for the given fabric.
+
+    Parameters
+    ----------
+    fabric : Fabric
+        Fabric object containing tile information.
+    outputFile : Path
+        File to write the pip information to.
+    delay_model : FABulousTimingModelInterface
+        Timing model interface to provide delay information, by default None.
+    """
+    pip_str, _, _, _ = genNextpnrModel(fabric, delay_model)
+    outputFile.write_text(pip_str, encoding="utf-8")

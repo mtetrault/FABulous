@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 from collections.abc import Callable, Sequence
 from concurrent import futures
 from importlib import resources
@@ -182,22 +181,13 @@ def create_project(project_dir: Path, lang: HDLType = HDLType.VERILOG) -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / ".FABulous").mkdir(parents=True, exist_ok=True)
 
-    # Copy templates from package resources using shutil.copytree
-    # Use a robust approach that works in all environments
     def _copy_template_safely(template_ref: Traversable, target_dir: Path) -> None:
-        """Copy template files safely, handling different installation environments."""
-        try:
-            # Try direct copy first (works in development/editable installs)
-            with resources.as_file(template_ref) as template_src:
-                shutil.copytree(template_src, target_dir, dirs_exist_ok=True)
-        except (OSError, PermissionError, shutil.Error) as e:
-            # Fallback: extract to temp directory first (works with wheels, frozen apps)
-            logger.debug(f"Direct copy failed ({e}), using temp directory fallback")
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_template = Path(temp_dir) / "template"
-                with resources.as_file(template_ref) as template_src:
-                    shutil.copytree(template_src, temp_template)
-                shutil.copytree(temp_template, target_dir, dirs_exist_ok=True)
+        """Copy a packaged template into `target_dir` with writable permissions."""
+        with resources.as_file(template_ref) as template_src:
+            shutil.copytree(template_src, target_dir, dirs_exist_ok=True)
+        target_dir.chmod(0o755)
+        for path in target_dir.rglob("*"):
+            path.chmod(0o755 if path.is_dir() else 0o644)
 
     # Copy common template first
     _copy_template_safely(common_template_ref, project_dir)
@@ -219,7 +209,7 @@ def create_project(project_dir: Path, lang: HDLType = HDLType.VERILOG) -> None:
     set_key(
         env_file,
         "FAB_MODELS_PACK",
-        str(Path(project_dir.name) / "Fabric" / f"models_pack.{new_suffix}"),
+        str(Path("..") / "Fabric" / f"models_pack.{new_suffix}"),
     )
 
     set_key(env_file, "FAB_PDK", "ihp-sg13g2")
@@ -234,19 +224,23 @@ def run_task(
     task_dir: Path,
     task_vars: dict[str, str] | None = None,
     verbose: bool = False,
+    taskfile: str | None = None,
 ) -> None:
-    """Run a Taskfile task using the ``task`` CLI.
+    """Run a Taskfile task using the `task` CLI.
 
     Parameters
     ----------
     task_name : str
-        Name of the task to run (e.g. ``"run-simulation"``).
+        Name of the task to run (e.g. `"run-simulation"`).
     task_dir : Path
-        Directory containing the ``Taskfile.yml``.
+        Directory containing the Taskfile.
     task_vars : dict[str, str] | None
-        Optional variables to pass to the task (``VAR=value``).
+        Optional variables to pass to the task (`VAR=value`).
     verbose : bool
-        If True, adds ``--verbose`` flag.
+        If True, adds `--verbose` flag.
+    taskfile : str | None
+        Explicit Taskfile name (e.g. `"compile.Taskfile.yml"`).
+        When None, ``task`` uses its default lookup (``Taskfile.yml``).
 
     Raises
     ------
@@ -261,6 +255,8 @@ def run_task(
         )
 
     cmd: list[str] = ["task", task_name]
+    if taskfile:
+        cmd.extend(["--taskfile", taskfile])
     if verbose:
         cmd.append("--verbose")
     if task_vars:
@@ -283,6 +279,127 @@ def copy_verilog_files(src: Path, dst: Path) -> None:
     for file_path in src.rglob("*.v"):
         destination_path = dst / file_path.name
         shutil.copy(file_path, destination_path)
+
+
+_TEXT_CLONE_EXTENSIONS = {
+    ".csv",
+    ".list",
+    ".v",
+    ".vhd",
+    ".vhdl",
+    ".yaml",
+    ".yml",
+    ".tcl",
+    ".sv",
+}
+
+
+def clone_tile_directory(
+    src_dir: Path, dst_dir: Path, src_name: str, dst_name: str
+) -> None:
+    """Copy a tile directory and rename all occurrences of src_name to dst_name.
+
+    Notes
+    -----
+    Only works correctly for tiles that follow the default FABulous tile naming
+    scheme, where the tile name is used as a prefix for all files and internal
+    references (e.g. `LUT4AB.csv`, `LUT4AB_switch_matrix.list`).
+
+    Parameters
+    ----------
+    src_dir : Path
+        Source tile directory to copy.
+    dst_dir : Path
+        Destination path for the cloned directory.
+    src_name : str
+        Tile name to replace in file contents and file/directory names.
+    dst_name : str
+        Replacement tile name.
+    """
+    shutil.copytree(src_dir, dst_dir)
+
+    for f in dst_dir.rglob("*"):
+        if f.is_file() and f.suffix in _TEXT_CLONE_EXTENSIONS:
+            text = f.read_text(encoding="utf-8")
+            if src_name in text:
+                f.write_text(text.replace(src_name, dst_name), encoding="utf-8")
+
+    # Rename deepest items first so parent paths remain valid when children move
+    for item in sorted(dst_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if src_name in item.name:
+            item.rename(item.parent / item.name.replace(src_name, dst_name))
+
+
+def resolve_tile(arg: str, tile_dir: Path) -> Path:
+    """Resolve a tile name-or-path argument to a Path.
+
+    An argument that is absolute or contains a directory separator is treated as
+    a filesystem path; otherwise it is treated as a bare tile name and looked up
+    under *tile_dir*.
+
+    Parameters
+    ----------
+    arg : str
+        Tile name or path supplied by the user.
+    tile_dir : Path
+        Project ``Tile/`` directory used for name-based lookup.
+
+    Returns
+    -------
+    Path
+        Resolved path (caller must validate existence as appropriate).
+    """
+    p = Path(arg)
+    if p.is_absolute() or p.parent != Path():
+        return p
+    return tile_dir / arg
+
+
+def register_tile_in_fabric_csv(csv_path: Path, dst_dir: Path) -> None:
+    """Append Tile/Supertile entries for `dst_dir` to `csv_path` before ParametersEnd.
+
+    The CSV paths are written relative to the directory containing `csv_path`
+    (i.e. the project root), so `dst_dir` may be anywhere on the filesystem.
+    Detects whether `dst_dir` is a supertile by checking for sub-directories
+    (excluding `macro`) inside it.
+
+    Parameters
+    ----------
+    csv_path : Path
+        Path to the fabric CSV file to update.
+    dst_dir : Path
+        Directory of the cloned tile.
+    """
+    dst_dir = dst_dir.resolve()
+    dst_name = dst_dir.name
+    project_dir = csv_path.parent.resolve()
+    tile_rel = dst_dir.relative_to(project_dir, walk_up=True).as_posix()
+
+    sub_tile_names = sorted(
+        f.name for f in dst_dir.iterdir() if f.is_dir() and f.name != "macro"
+    )
+    lines = csv_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    ref_line = next((ln for ln in lines if ln.startswith("Tile,")), "")
+    trailing = "," * (ref_line.rstrip("\n\r").count(",") - 1) if ref_line else ""
+
+    new_entries: list[str] = []
+    if sub_tile_names:
+        for sub in sub_tile_names:
+            new_entries.append(
+                f"Tile,./{Path(tile_rel, sub, f'{sub}.csv')!s}{trailing}\n"
+            )
+        new_entries.append(
+            f"Supertile,./{Path(tile_rel, f'{dst_name}.csv')!s}{trailing}\n"
+        )
+    else:
+        new_entries.append(f"Tile,./{Path(tile_rel, f'{dst_name}.csv')!s}{trailing}\n")
+
+    result: list[str] = []
+    for line in lines:
+        if line.strip().startswith("ParametersEnd"):
+            result.extend(new_entries)
+        result.append(line)
+    csv_path.write_text("".join(result), encoding="utf-8")
 
 
 def remove_dir(path: Path) -> None:
@@ -852,6 +969,8 @@ def get_file_path(
             key=lambda f: f.stat().st_mtime,
             reverse=True,
         )[:show_count]
+        if not files_list:
+            raise FileNotFoundError(f"No .{file_extension} files found in '{f}'.")
         _, idx = pick(
             list(map(lambda x: str(x.relative_to(project_dir)), files_list)),
             title,
@@ -878,5 +997,4 @@ def get_file_path(
         raise FileNotFoundError(
             f"No .{file_extension} files found in the specified directory."
         )
-
     return file

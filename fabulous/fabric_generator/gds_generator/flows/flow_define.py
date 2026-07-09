@@ -17,8 +17,20 @@ from librelane.flows.sequential import SequentialFlow
 from fabulous.fabric_generator.gds_generator.steps.condition_magic_drc import (
     ConditionalMagicDRC,
 )
+from fabulous.fabric_generator.gds_generator.steps.diodes_on_ports import (
+    FABulousDiodesOnPorts,
+)
 from fabulous.fabric_generator.gds_generator.steps.extract_pdk_info import (
     ExtractPDKInfo,
+)
+from fabulous.fabric_generator.gds_generator.steps.magic_streamout import (
+    FABulousMagicStreamOut,
+)
+from fabulous.fabric_generator.gds_generator.steps.tile_area_opt import (
+    TileAreaOptimisation,
+)
+from fabulous.fabric_generator.gds_generator.steps.vhdl_json_header import (
+    FABulousVHDLJsonHeader,
 )
 
 prep_steps: list[type[Step]] = [
@@ -28,6 +40,21 @@ prep_steps: list[type[Step]] = [
     Checker.LintWarnings,
     pyYosys.JsonHeader,
     pyYosys.Synthesis,
+    Checker.YosysUnmappedCells,
+    Checker.YosysSynthChecks,
+    Checker.NetlistAssignStatements,
+    OpenROAD.CheckSDCFiles,
+    OpenROAD.CheckMacroInstances,
+    ExtractPDKInfo,
+]
+
+# VHDL prep mirrors `prep_steps` but reads the design through GHDL: the Verilator
+# linting steps are dropped (they cannot parse VHDL), `Yosys.Synthesis` becomes
+# `Yosys.VHDLSynthesis`, and `Yosys.JsonHeader` becomes the GHDL-backed
+# `FABulousVHDLJsonHeader` so the `JSON_HEADER` view is still produced.
+vhdl_prep_steps: list[type[Step]] = [
+    FABulousVHDLJsonHeader,
+    pyYosys.VHDLSynthesis,
     Checker.YosysUnmappedCells,
     Checker.YosysSynthChecks,
     Checker.NetlistAssignStatements,
@@ -49,9 +76,9 @@ physical_steps: list[type[Step]] = [
     OpenROAD.GeneratePDN,
     Odb.RemovePDNObstructions,
     Odb.AddRoutingObstructions,
-    OpenROAD.GlobalPlacementSkipIO,
     Odb.CustomIOPlacement,
     Odb.ApplyDEFTemplate,
+    FABulousDiodesOnPorts,
     OpenROAD.GlobalPlacement,
     Odb.WriteVerilogHeader,
     Checker.PowerGridViolations,
@@ -66,7 +93,6 @@ physical_steps: list[type[Step]] = [
     OpenROAD.GlobalRouting,
     OpenROAD.CheckAntennas,
     OpenROAD.RepairDesignPostGRT,
-    Odb.DiodesOnPorts,
     Odb.HeuristicDiodeInsertion,
     OpenROAD.RepairAntennas,
     OpenROAD.ResizerTimingPostGRT,
@@ -86,8 +112,16 @@ physical_steps: list[type[Step]] = [
     OpenROAD.IRDropReport,
 ]
 
+tile_optimisation_physical_steps: list[type[Step]] = [
+    TileAreaOptimisation,
+    OpenROAD.FillInsertion,
+    Odb.CellFrequencyTables,
+    OpenROAD.RCX,
+    OpenROAD.IRDropReport,
+]
+
 write_out_steps: list[type[Step]] = [
-    Magic.StreamOut,
+    FABulousMagicStreamOut,
     KLayout.StreamOut,
     Magic.WriteLEF,
 ]
@@ -126,7 +160,7 @@ classic_gating_config_vars: dict[str, list[str]] = {
     "OpenROAD.FillInsertion": ["RUN_FILL_INSERTION"],
     "OpenROAD.STAPostPNR": ["RUN_MCSTA"],
     "OpenROAD.IRDropReport": ["RUN_IRDROP_REPORT"],
-    "Magic.StreamOut": ["RUN_MAGIC_STREAMOUT"],
+    "Magic.FABulousStreamOut": ["RUN_MAGIC_STREAMOUT"],
     "KLayout.StreamOut": ["RUN_KLAYOUT_STREAMOUT"],
     "Magic.WriteLEF": ["RUN_MAGIC_WRITE_LEF"],
     "Magic.DRC": ["RUN_MAGIC_DRC"],

@@ -5,19 +5,29 @@ parsing fabric definitions, generating HDL code, creating geometries, and handli
 various fabric-related operations.
 """
 
+import shutil
 from collections.abc import Iterable
 from pathlib import Path
 
-import yaml
 from loguru import logger
 
 import fabulous.fabric_cad.gen_npnr_model as model_gen_npnr
 import fabulous.fabric_generator.parser.parse_csv as fileParser
 from fabulous.fabric_cad.gen_bitstream_spec import generateBitstreamSpec
 from fabulous.fabric_cad.gen_design_top_wrapper import generateUserDesignTopWrapper
+from fabulous.fabric_cad.timing_model.FABulous_timing_model_interface import (
+    FABulousTimingModelInterface,
+)
+from fabulous.fabric_cad.timing_model.models import (
+    TimingModelConfig,
+    TimingModelMode,
+    TimingModelStaTools,
+    TimingModelSynthTools,
+)
 
 # Importing Modules from FABulous Framework.
 from fabulous.fabric_definition.bel import Bel
+from fabulous.fabric_definition.define import ConfigBitMode, Side
 from fabulous.fabric_definition.fabric import Fabric
 from fabulous.fabric_definition.supertile import SuperTile
 from fabulous.fabric_definition.tile import Tile
@@ -27,12 +37,14 @@ from fabulous.fabric_generator.code_generator.code_generator_VHDL import (
 )
 from fabulous.fabric_generator.gds_generator.flows.fabric_macro_flow import (
     FABulousFabricMacroFlow,
+    FABulousFabricVHDLMacroFlow,
 )
-from fabulous.fabric_generator.gds_generator.flows.full_fabric_flow import (
-    FABulousFabricMacroFullFlow,
+from fabulous.fabric_generator.gds_generator.flows.fabric_optimisation_flow import (
+    FABulousFabricOptimisationFlow,
 )
 from fabulous.fabric_generator.gds_generator.flows.tile_macro_flow import (
     FABulousTileVerilogMacroFlow,
+    FABulousTileVHDLMacroFlow,
 )
 from fabulous.fabric_generator.gds_generator.flows.flow_define import (
     SelectFlow,
@@ -40,15 +52,21 @@ from fabulous.fabric_generator.gds_generator.flows.flow_define import (
 from fabulous.fabric_generator.gds_generator.gen_io_pin_config_yaml import (
     generate_IO_pin_order_config,
 )
-from fabulous.fabric_generator.gds_generator.steps.tile_optimisation import OptMode
+from fabulous.fabric_generator.gds_generator.steps.tile_area_opt import OptMode
 from fabulous.fabric_generator.gen_fabric.fabric_automation import genIOBel
-from fabulous.fabric_generator.gen_fabric.gen_configmem import generateConfigMem
+from fabulous.fabric_generator.gen_fabric.gen_configmem import (
+    generate_super_tile_config_mem,
+    generateConfigMem,
+)
 from fabulous.fabric_generator.gen_fabric.gen_fabric import generateFabric
 from fabulous.fabric_generator.gen_fabric.gen_helper import (
     bootstrapSwitchMatrix,
     list2CSV,
 )
-from fabulous.fabric_generator.gen_fabric.gen_switchmatrix import genTileSwitchMatrix
+from fabulous.fabric_generator.gen_fabric.gen_switchmatrix import (
+    gen_super_tile_switch_matrix,
+    genTileSwitchMatrix,
+)
 from fabulous.fabric_generator.gen_fabric.gen_tile import (
     generateSuperTile,
     generateTile,
@@ -182,7 +200,14 @@ class FABulous_API:
             If tile is not found in fabric.
         """
         if tile := self.fabric.getTileByName(tileName):
-            generateConfigMem(self.writer, self.fabric, tile, configMem)
+            generateConfigMem(
+                self.writer,
+                tile.name,
+                tile.globalConfigBits,
+                configMem,
+                frame_bits_per_row=self.fabric.frameBitsPerRow,
+                max_frame_per_col=self.fabric.maxFramesPerCol,
+            )
         else:
             raise ValueError(f"Tile {tileName} not found")
 
@@ -215,15 +240,25 @@ class FABulous_API:
             )
             genTileSwitchMatrix(
                 self.writer,
-                self.fabric,
                 tile,
                 switch_matrix_debug_signal,
                 csv_output_dir=csv_output_dir,
+                config_bit_mode=self.fabric.configBitMode,
+                multiplexer_style=self.fabric.multiplexerStyle,
+                default_pip_delay=self.fabric.generateDelayInSwitchMatrix,
+                preserve_list_order=self.fabric.preserveListOrder,
             )
         else:
             raise ValueError(f"Tile {tileName} not found")
 
-    def genTile(self, tileName: str) -> None:
+    def genTile(
+        self,
+        tileName: str,
+        frame_bit_per_row: int | None = None,
+        max_frame_per_col: int | None = None,
+        disable_user_clk: bool | None = None,
+        config_bit_mode: ConfigBitMode | None = None,
+    ) -> None:
         """Generate a tile based on its name.
 
         Using 'generateTile' defined in 'fabric_gen.py'.
@@ -232,6 +267,18 @@ class FABulous_API:
         ----------
         tileName : str
             Name of the tile generated.
+        frame_bit_per_row : int | None
+            Override for the fabric's ``frameBitsPerRow``. If ``None``, the value
+            from ``self.fabric`` is used.
+        max_frame_per_col : int | None
+            Override for the fabric's ``maxFramesPerCol``. If ``None``, the value
+            from ``self.fabric`` is used.
+        disable_user_clk : bool | None
+            Override for the fabric's ``disableUserCLK``. If ``None``, the value
+            from ``self.fabric`` is used.
+        config_bit_mode : ConfigBitMode | None
+            Override for the fabric's ``configBitMode``. If ``None``, the value
+            from ``self.fabric`` is used.
 
         Raises
         ------
@@ -239,11 +286,25 @@ class FABulous_API:
             If tile is not found in fabric.
         """
         if tile := self.fabric.getTileByName(tileName):
-            generateTile(self.writer, self.fabric, tile)
+            generateTile(
+                self.writer,
+                tile,
+                frame_bit_per_row or self.fabric.frameBitsPerRow,
+                max_frame_per_col or self.fabric.maxFramesPerCol,
+                disable_user_clk or self.fabric.disableUserCLK,
+                config_bit_mode or self.fabric.configBitMode,
+            )
         else:
             raise ValueError(f"Tile {tileName} not found")
 
-    def genSuperTile(self, tileName: str) -> None:
+    def genSuperTile(
+        self,
+        tileName: str,
+        frame_bit_per_row: int | None = None,
+        max_frame_per_col: int | None = None,
+        disable_user_clk: bool | None = None,
+        config_bit_mode: ConfigBitMode | None = None,
+    ) -> None:
         """Generate a super tile based on its name.
 
         Using 'generateSuperTile' defined in 'fabric_gen.py'.
@@ -252,6 +313,18 @@ class FABulous_API:
         ----------
         tileName : str
             Name of the super tile generated.
+        frame_bit_per_row : int | None
+            Override for the fabric's ``frameBitsPerRow``. If ``None``, the value
+            from ``self.fabric`` is used.
+        max_frame_per_col : int | None
+            Override for the fabric's ``maxFramesPerCol``. If ``None``, the value
+            from ``self.fabric`` is used.
+        disable_user_clk : bool | None
+            Override for the fabric's ``disableUserCLK``. If ``None``, the value
+            from ``self.fabric`` is used.
+        config_bit_mode : ConfigBitMode | None
+            Override for the fabric's ``configBitMode``. If ``None``, the value
+            from ``self.fabric`` is used.
 
         Raises
         ------
@@ -259,7 +332,75 @@ class FABulous_API:
             If super tile is not found in fabric.
         """
         if tile := self.fabric.getSuperTileByName(tileName):
-            generateSuperTile(self.writer, self.fabric, tile)
+            generateSuperTile(
+                self.writer,
+                tile,
+                frame_bit_per_row or self.fabric.frameBitsPerRow,
+                max_frame_per_col or self.fabric.maxFramesPerCol,
+                disable_user_clk or self.fabric.disableUserCLK,
+                config_bit_mode or self.fabric.configBitMode,
+            )
+        else:
+            raise ValueError(f"SuperTile {tileName} not found")
+
+    def gen_super_tile_switch_matrix(self, tileName: str) -> None:
+        """Generate the switch matrix RTL for a supertile.
+
+        Only has an effect when the supertile directory contains a
+        `supertile_matrix.csv` or `supertile_matrix.list` file.  If no such
+        file exists the call is a no-op.
+
+        Parameters
+        ----------
+        tileName : str
+            Name of the super tile.
+
+        Raises
+        ------
+        ValueError
+            If the super tile is not found in the fabric.
+        """
+        if tile := self.fabric.getSuperTileByName(tileName):
+            gen_super_tile_switch_matrix(
+                self.writer,
+                tile,
+                config_bit_mode=self.fabric.configBitMode,
+                multiplexer_style=self.fabric.multiplexerStyle,
+                default_pip_delay=self.fabric.generateDelayInSwitchMatrix,
+            )
+        else:
+            raise ValueError(f"SuperTile {tileName} not found")
+
+    def gen_super_tile_config_mem(self, tileName: str) -> None:
+        """Generate the ConfigMem RTL for a supertile.
+
+        Uses the free slots in the master tile's frame space to place the
+        supertile SM and BEL config bits.  No-op when the supertile has no
+        config bits.
+
+        Parameters
+        ----------
+        tileName : str
+            Name of the super tile.
+
+        Raises
+        ------
+        ValueError
+            If the super tile is not found in the fabric.
+        """
+        if tile := self.fabric.getSuperTileByName(tileName):
+            mx, my = tile.get_master_tile_coords()
+            master_tile = tile.tileMap[my][mx]
+            master_config_mem_csv = (
+                master_tile.tileDir.parent / f"{master_tile.name}_ConfigMem.csv"
+            )
+            generate_super_tile_config_mem(
+                self.writer,
+                tile,
+                master_config_mem_csv,
+                frame_bits_per_row=self.fabric.frameBitsPerRow,
+                max_frame_per_col=self.fabric.maxFramesPerCol,
+            )
         else:
             raise ValueError(f"SuperTile {tileName} not found")
 
@@ -485,7 +626,14 @@ class FABulous_API:
                 logger.info(f"Generating IO BELs for tile {tile.name}")
                 self.genIOBelForTile(tile.name)
 
-    def gen_io_pin_order_config(self, tile: Tile | SuperTile, outfile: Path) -> None:
+    def gen_io_pin_order_config(
+        self,
+        tile: Tile | SuperTile,
+        outfile: Path,
+        prefix: str = "",
+        *,
+        external_port_side: Side = Side.SOUTH,
+    ) -> None:
         """Generate IO pin order configuration YAML for a tile or super tile.
 
         Parameters
@@ -494,8 +642,19 @@ class FABulous_API:
             The fabric element for which to generate the configuration.
         outfile : Path
             Output YAML path.
+        prefix : str
+            Prefix to add to port names.
+        external_port_side : Side
+            Side used for BEL external ports when no fabric placement context
+            is available.
         """
-        generate_IO_pin_order_config(self.fabric, tile, outfile)
+        generate_IO_pin_order_config(
+            tile,
+            outfile,
+            fabric=self.fabric,
+            prefix=prefix,
+            external_port_side=external_port_side,
+        )
 
     def genTileMacro(
         self,
@@ -506,22 +665,24 @@ class FABulous_API:
         pdk_root: Path,
         *,
         final_view: Path | None = None,
-        optimisation: OptMode = OptMode.BALANCE,
+        optimisation: OptMode | None = OptMode.BALANCE,
         base_config_path: Path | None = None,
         config_override_path: Path | None = None,
         custom_config_overrides: dict | None = None,
     ) -> None:
-        """Run the macro flow to generate the macro Verilog files."""
+        """Run the macro flow to harden a tile, in the project's HDL language."""
         logger.info(f"PDK root: {pdk_root}")
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
-
-        flow_class = SelectFlow(FABulousTileVerilogMacroFlow)
-
-        flow = flow_class(
+        tile_flow_cls = (
+            FABulousTileVHDLMacroFlow
+            if isinstance(self.writer, VHDLCodeGenerator)
+            else SelectFlow(FABulousTileVerilogMacroFlow)
+        )
+        flow = tile_flow_cls(
             self.fabric.getTileByName(tile_dir.name),
             io_pin_config,
-            optimisation,
+            OptMode(optimisation),
             pdk=pdk,
             pdk_root=pdk_root,
             base_config_path=base_config_path,
@@ -558,7 +719,7 @@ class FABulous_API:
         tile_macro_paths : dict[str, Path]
             Dictionary mapping tile names to their macro output directories.
         fabric_path : Path
-            Path to the fabric-level Verilog file.
+            Path to the fabric-level HDL file.
         out_folder : Path
             Output directory for the stitched fabric.
         pdk : str
@@ -576,12 +737,14 @@ class FABulous_API:
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
 
-
-        flow_class = SelectFlow(FABulousFabricMacroFlow)
-
-        flow = flow_class(
+        fabric_flow_cls = (
+            FABulousFabricVHDLMacroFlow
+            if isinstance(self.writer, VHDLCodeGenerator)
+            else SelectFlow(FABulousFabricMacroFlow)
+        )
+        flow = fabric_flow_cls(
             fabric=self.fabric,
-            fabric_verilog_paths=[fabric_path],
+            fabric_hdl_paths=[fabric_path],
             tile_macro_dirs=tile_macro_paths,
             base_config_path=base_config_path,
             config_override_path=config_override_path,
@@ -605,40 +768,152 @@ class FABulous_API:
         base_config_path: Path | None = None,
         config_override_path: Path | None = None,
         tile_opt_config: Path | None = None,
+        nlp_only: bool = False,
+        nlp_area_margin: float = 0.05,
         **config_overrides: dict,
     ) -> None:
         """Run the stitching flow to assemble tile macros into a fabric-level GDS."""
         logger.info(f"PDK root: {pdk_root}")
         logger.info(f"PDK: {pdk}")
         logger.info(f"Output folder: {out_folder.resolve()}")
-        final_config_args = {}
-        if base_config_path is not None:
-            final_config_args.update(
-                yaml.safe_load(base_config_path.read_text(encoding="utf-8"))
-            )
-        if config_override_path is not None:
-            final_config_args.update(
-                yaml.safe_load(config_override_path.read_text(encoding="utf-8"))
-            )
-        final_config_args["FABULOUS_PROJ_DIR"] = str(project_dir.resolve())
-        final_config_args["FABULOUS_FABRIC"] = self.fabric
-        final_config_args["DESIGN_NAME"] = self.fabric.name
+        config_args = {
+            "FABULOUS_PROJ_DIR": str(project_dir.resolve()),
+            "FABULOUS_FABRIC": self.fabric,
+            "DESIGN_NAME": self.fabric.name,
+            "FABULOUS_NLP_ONLY": nlp_only,
+            "FABULOUS_NLP_AREA_MARGIN": nlp_area_margin,
+        }
         if tile_opt_config is not None:
-            final_config_args["TILE_OPT_INFO"] = str(tile_opt_config)
-        if config_overrides:
-            final_config_args.update(config_overrides)
-
-
-        flow_class = SelectFlow(FABulousFabricMacroFullFlow)
-
-        flow = flow_class(
-            final_config_args,
+            config_args["TILE_OPT_INFO"] = str(tile_opt_config)
+        configs = [
+            i
+            for i in [
+                config_args,
+                base_config_path,
+                config_override_path,
+                config_overrides,
+            ]
+            if i is not None
+        ]
+        flow = SelectFlow(FABulousFabricMacroFullFlow)(
+            configs,
             name=self.fabric.name,
             design_dir=str(out_folder.resolve()),
             pdk=pdk,
             pdk_root=str(pdk_root.resolve()),
         )
         result = flow.start()
-        logger.info(f"Saving final views for FABulous to {out_folder / 'final_views'}")
-        result.save_snapshot(out_folder / "final_views")
+        final_views = out_folder / "final_views"
+        logger.info(f"Saving final views for FABulous to {final_views}")
+        result.save_snapshot(final_views)
+        tile_opt_summary = flow.config.get("TILE_OPT_INFO")
+        if tile_opt_summary is not None:
+            summary_src = Path(tile_opt_summary)
+            summary_dst = final_views / summary_src.name
+            logger.info(f"Copying tile optimisation summary to {summary_dst}")
+            shutil.copyfile(summary_src, summary_dst)
         logger.info("Stitching flow completed.")
+
+    def timing_model_interface(
+        self,
+        mode: str,
+        output_file: Path,
+        debug: bool,
+        manual_config: TimingModelConfig | None = None,
+    ) -> TimingModelConfig:
+        """Initialise timing model interface, generate nextpnr pip file for the fabric.
+
+        Parameters
+        ----------
+        mode : str
+            The mode in which to run the timing model interface.
+        output_file : Path
+            The path where the generated nextpnr pip file will be saved.
+        debug : bool
+            Whether to enable debug mode for the timing model interface,
+            which may provide more verbose logging.
+        manual_config : TimingModelConfig | None
+            Optional manual configuration for the timing model interface.
+            If provided, this configuration will be used instead of the default
+            PDK-based configuration.
+
+        Returns
+        -------
+        TimingModelConfig
+            The configuration used for the timing model interface, which may be the
+            default PDK-based configuration or the provided manual configuration.
+
+        Raises
+        ------
+        ValueError
+            If no default timing model configuration is available for the
+            current PDK and no manual configuration is provided.
+        """
+        pdk: str | None = get_context().pdk
+        pdk_root: Path | None = get_context().pdk_root
+
+        if pdk is not None and pdk_root is not None:
+            pdk_root = Path.resolve(pdk_root / pdk).absolute()
+
+        iconfig: TimingModelConfig | None = None
+
+        match pdk:
+            case "ihp-sg13g2":
+                liberty_files: Path = (
+                    pdk_root
+                    / "libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_typ_1p20V_25C.lib"
+                )
+                techmap_files: list[Path] = [
+                    pdk_root / "libs.tech/librelane/sg13g2_stdcell/latch_map.v",
+                    pdk_root / "libs.tech/librelane/sg13g2_stdcell/tribuff_map.v",
+                ]
+                min_buf_cell_and_ports: str = "sg13g2_buf_1 A X"
+
+            case "sky130A" | "sky130B":
+                liberty_files: Path = (
+                    pdk_root
+                    / "libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"
+                )
+                techmap_files: list[Path] = [
+                    pdk_root / "libs.tech/openlane/sky130_fd_sc_hd/latch_map.v",
+                    pdk_root / "libs.tech/openlane/sky130_fd_sc_hd/tribuff_map.v",
+                ]
+                min_buf_cell_and_ports: str = "sky130_fd_sc_hd__buf_1 A X"
+
+            case _:
+                if manual_config is None:
+                    raise ValueError(
+                        f"No default timing model configuration for PDK {pdk}. "
+                        f"Please provide a manual configuration or add "
+                        f"defaults for this PDK."
+                    )
+
+        # Allow manual configuration to override defaults for flexibility, but default
+        # to PDK-based configuration if not provided.
+        if manual_config is not None:
+            iconfig = manual_config
+            logger.info("Using manual timing model configuration.")
+        else:
+            iconfig = TimingModelConfig(
+                project_dir=get_context().proj_dir,
+                liberty_files=liberty_files,
+                techmap_files=techmap_files,
+                pdk_name=pdk,
+                min_buf_cell_and_ports=min_buf_cell_and_ports,
+                synth_executable=get_context().yosys_path,
+                synth_program=TimingModelSynthTools.YOSYS,
+                sta_executable=get_context().opensta_path,
+                sta_program=TimingModelStaTools.OPENSTA,
+                mode=TimingModelMode(mode),
+                debug=debug,
+            )
+
+        ftmi = FABulousTimingModelInterface(config=iconfig, fabric=self.fabric)
+
+        model_gen_npnr.writeNextpnrPipFile(
+            fabric=self.fabric,
+            outputFile=output_file,
+            delay_model=ftmi,
+        )
+
+        return iconfig

@@ -5,6 +5,7 @@ tool paths, project settings, and environment variable management.
 """
 
 import os
+import re
 from importlib.metadata import version as meta_version
 from pathlib import Path
 from shutil import which
@@ -34,6 +35,15 @@ from fabulous.fabric_definition.define import HDLType
 
 # User configuration directory for FABulous
 FAB_USER_CONFIG_DIR = Path(typer.get_app_dir("FABulous", force_posix=True))
+MODELS_PACK_REQUIRED_MODULES: list[str] = [
+    "config_latch",
+    "my_buf",
+    "clk_buf",
+    "cus_mux41",
+    "cus_mux21",
+    "cus_mux81",
+    "cus_mux161",
+]
 
 
 class FABulousSettings(BaseSettings):
@@ -49,6 +59,7 @@ class FABulousSettings(BaseSettings):
 
     oss_cad_suite: Path | None = None
     yosys_path: Path | str = Field(default="yosys", validate_default=True)
+    opensta_path: Path | str = Field(default="sta", validate_default=True)
     nextpnr_path: Path | str = Field(default="nextpnr-generic", validate_default=True)
     iverilog_path: Path | str = Field(default="iverilog", validate_default=True)
     vvp_path: Path | str = Field(default="vvp", validate_default=True)
@@ -68,16 +79,30 @@ class FABulousSettings(BaseSettings):
         deprecated=True,
         description="Deprecated, use proj_version instead",
     )
+    max_worker: int | None = Field(
+        default=2,
+        ge=0,
+        description="Maximum number of worker processes for parallel tasks. "
+        "0 or None means use the system default. (Multiple workers are only "
+        "used for the full fabric flow for now)",
+    )
 
     # CLI variable
     editor: str | None = None
     verbose: int = 0
     debug: bool = False
+    nix_shell: str | None = None
+    nix_no_check: bool = False
 
     # GDS variables
     pdk_root: Path | None = Field(
         default=None,
-        description="Root directory of the PDK installation",
+        description=(
+            "Path to the PDK family directory . "
+            "When unset for a ciel-managed PDK it is auto-resolved to "
+            "`<ciel_home>/<family>`; the install dir for the active "
+            "variant is then at ``pdk_root/<pdk>``."
+        ),
     )
     pdk: str | None = Field(
         default=None,
@@ -180,9 +205,8 @@ class FABulousSettings(BaseSettings):
             return None
 
         if not value.is_file():
-            # models_pack path is by default as a relative path starting from proj_dir
-            # This can cause errors if FABulous is called from a different working dir
-            # So we have to puzzle the models_pack path back together from there.
+            # models_pack path is stored as a relative path in .env.
+            # Resolve it relative to the .FABulous directory (where .env lives).
             if proj_dir := info.data.get("proj_dir"):
                 proj_dir = Path(proj_dir).absolute()
                 if not proj_dir.exists():
@@ -190,23 +214,29 @@ class FABulousSettings(BaseSettings):
             else:
                 raise ValueError("Project directory is not set.")
 
-            # Check if `project_dir` is not an absolute path and
-            # in the models_pack path, since in the default it is
-            # put there as folder.
-            if not value.is_absolute() and proj_dir.name in value.parts:
-                parts = list(value.parts)
-                index = parts.index(proj_dir.name)
-                value = proj_dir.joinpath(*parts[index + 1 :])
-                if not value.is_file():
-                    raise ValueError(
-                        f"Models pack file does not exist: {value}"
-                        " Check your FAB_MODELS_PACK env var setting."
-                    )
-            else:
+            fab_dir = proj_dir / ".FABulous"
+            resolved = None
+
+            if not value.is_absolute():
+                # New format: relative to .FABulous dir (e.g. "../Fabric/models_pack.v")
+                candidate = (fab_dir / value).resolve()
+                if candidate.is_file():
+                    resolved = candidate
+                elif proj_dir.name in value.parts:
+                    # Backward compat: old format had proj_dir name as prefix
+                    # (e.g. "my_project/Fabric/models_pack.v")
+                    parts = value.parts
+                    index = parts.index(proj_dir.name)
+                    candidate = proj_dir.joinpath(*parts[index + 1 :]).resolve()
+                    if candidate.is_file():
+                        resolved = candidate
+
+            if resolved is None:
                 raise ValueError(
                     f"Models pack file does not exist: {value}"
                     " Check your FAB_MODELS_PACK env var setting."
                 )
+            value = resolved
 
         # Retrieve previously validated proj_lang (falls back to default enum value)
         try:
@@ -227,6 +257,39 @@ class FABulousSettings(BaseSettings):
             )
         if proj_lang == HDLType.VHDL and value.suffix not in {".vhdl", ".vhd"}:
             raise ValueError("Models pack for VHDL must be a .vhdl or .vhd file")
+
+        # YosysJson cannot be used here (circular import + settings not yet
+        # fully initialised), so we do a lightweight regex scan instead.
+        if value.suffix in {".v", ".sv", ".vhd", ".vhdl"}:
+            content = value.read_text()
+
+            if value.suffix in {".v", ".sv"}:
+                # Strip comments before scanning so commented-out module
+                # declarations are not mistaken for real ones.
+                content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+                content = re.sub(r"//[^\n]*", "", content)
+                found = set(re.findall(r"^\s*module\s+(\w+)", content, re.MULTILINE))
+            else:
+                # VHDL only has single-line comments ("--").
+                content = re.sub(r"--[^\n]*", "", content)
+                found = {
+                    match.lower()
+                    for match in re.findall(
+                        r"^\s*entity\s+(\w+)\s+is",
+                        content,
+                        re.MULTILINE | re.IGNORECASE,
+                    )
+                }
+
+            missing = [m for m in MODELS_PACK_REQUIRED_MODULES if m not in found]
+            if missing:
+                logger.warning(
+                    f"The models pack at '{value}' is missing the following "
+                    f"models-pack definitions: {missing}. "
+                    "The models pack may be outdated. Update it to a recent "
+                    "version from upstream FABulous, or use an older version "
+                    "of FABulous."
+                )
 
         logger.info(f"Using models pack at: {value.absolute()}")
         return value.absolute()
@@ -284,6 +347,7 @@ class FABulousSettings(BaseSettings):
     # Resolve external tool paths only after object creation (post env setup)
     @field_validator(
         "yosys_path",
+        "opensta_path",
         "nextpnr_path",
         "iverilog_path",
         "vvp_path",
@@ -325,6 +389,7 @@ class FABulousSettings(BaseSettings):
             return Path(value).resolve()
         tool_map = {
             "yosys_path": "yosys",
+            "opensta_path": "sta",
             "nextpnr_path": "nextpnr-generic",
             "iverilog_path": "iverilog",
             "vvp_path": "vvp",
@@ -352,8 +417,10 @@ class FABulousSettings(BaseSettings):
         provided, this validator resolves the recommended hash from librelane
         and auto-installs/activates the PDK via ciel.
 
-        Validation rules
-        ----------------
+        Notes
+        -----
+        Validation rules:
+
         1. Both ``pdk`` and ``pdk_root`` are None  -> warn, return (GDS unavailable)
         2. ``pdk_root`` set but ``pdk`` is None    -> raise ValueError
         3. ``pdk`` set, ``pdk_root`` None, ciel family   -> auto-resolve pdk_root
@@ -432,8 +499,18 @@ class FABulousSettings(BaseSettings):
                 "https://fossi-foundation.github.io/ciel-releases"
             ),
         )
+
+        if self.pdk == ciel_family.name and self.pdk not in ciel_family.variants:
+            logger.warning(
+                "FAB_PDK is set to a supported family name, but it should be set to "
+                "the variant name. "
+                "Auto resolving to the default variant for the family."
+            )
+            self.pdk = ciel_family.default_variant
+
         logger.info(
-            f"Auto-resolved PDK hash: {self.pdk_hash[:12]} for family '{ciel_family}'"
+            f"Auto-resolved PDK hash: {self.pdk_hash[:12]} for family "
+            f"'{ciel_family.name}' with variant '{self.pdk}'. "
         )
 
         pdk_path = self.pdk_root.resolve()
@@ -481,7 +558,9 @@ def init_context(
 
     if api_mode:
         logger.debug("API mode: skipping all validation")
-        return FABulousSettings.model_construct()
+        return FABulousSettings.model_construct(
+            nix_shell=os.environ.get("FAB_NIX_SHELL"),
+        )
 
     # 1. User config .env file (global)
     user_config_env = FAB_USER_CONFIG_DIR / ".env"

@@ -25,15 +25,19 @@ import csv
 import os
 import pickle
 import pprint
+import re
 import shutil
 import subprocess as sp
 import sys
 import tempfile
 import tkinter as tk
 import traceback
+from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
+import yaml
 from cmd2 import (
     Cmd,
     Cmd2ArgumentParser,
@@ -43,31 +47,36 @@ from cmd2 import (
     with_argparser,
     with_category,
 )
-from FABulous_bit_gen import genBitstream
 from loguru import logger
 
 from fabulous.custom_exception import CommandError, EnvironmentNotSet, InvalidFileType
+from fabulous.fabric_cad.timing_model.models import (
+    TimingModelConfig,
+    TimingModelMode,
+    TimingModelTileSourceFiles,
+)
 from fabulous.fabric_generator.code_generator.code_generator_Verilog import (
     VerilogCodeGenerator,
 )
 from fabulous.fabric_generator.code_generator.code_generator_VHDL import (
     VHDLCodeGenerator,
 )
-from fabulous.fabric_generator.gds_generator.steps.tile_optimisation import OptMode
+from fabulous.fabric_generator.gds_generator.steps.tile_area_opt import OptMode
 from fabulous.fabric_generator.gen_fabric.fabric_automation import (
     generateCustomTileConfig,
 )
 from fabulous.fabric_generator.parser.parse_csv import parseTilesCSV
 from fabulous.fabulous_api import FABulous_API
-from fabulous.fabulous_cli import cmd_synthesis
+from fabulous.fabulous_cli import cmd_compile_design, cmd_run_simulation
 from fabulous.fabulous_cli.helper import (
     CommandPipeline,
     allow_blank,
+    clone_tile_directory,
     get_file_path,
     install_fabulator,
     install_oss_cad_suite,
-    make_hex,
-    run_task,
+    register_tile_in_fabric_csv,
+    resolve_tile,
     wrap_with_except_handling,
 )
 from fabulous.fabulous_settings import get_context, is_pdk_config_set
@@ -82,6 +91,97 @@ CMD_OTHER = "Other"
 CMD_GUI = "GUI"
 CMD_SCRIPT = "Script"
 CMD_TOOLS = "Tools"
+CMD_TIMING_MODEL = "Timing Characterization"
+
+# klayout layer property file naming differs by PDK:
+# - ihp-sg13g2 ships sg13g2.lyp under its single-variant install dir.
+# - gf180mcu ships a single gf180mcu.lyp shared by every variant (A/B/C/D).
+# - Other PDKs (e.g. sky130A/B) follow the variant-name convention.
+KLAYOUT_LAYER_FILE_NAMES: dict[str, str] = {
+    "ihp-sg13g2": "sg13g2.lyp",
+    "gf180mcuA": "gf180mcu.lyp",
+    "gf180mcuB": "gf180mcu.lyp",
+    "gf180mcuC": "gf180mcu.lyp",
+    "gf180mcuD": "gf180mcu.lyp",
+}
+
+
+def _require_directional_mode(
+    opt_mode: OptMode, implied: OptMode, flag: str
+) -> OptMode:
+    """Return the directional mode a ``--fix-*`` flag implies, or raise on conflict.
+
+    Parameters
+    ----------
+    opt_mode : OptMode
+        The mode requested via ``--optimise`` (``NO_OPT`` when unset).
+    implied : OptMode
+        The directional mode the fix flag requires.
+    flag : str
+        The flag name, used for the error message.
+
+    Returns
+    -------
+    OptMode
+        ``implied`` when compatible with ``opt_mode``.
+
+    Raises
+    ------
+    ValueError
+        If ``opt_mode`` is an explicit mode other than ``implied``.
+    """
+    if opt_mode in (OptMode.NO_OPT, implied):
+        return implied
+    raise ValueError(
+        f"{flag} is only valid with --optimise {implied.value}, not {opt_mode.value}."
+    )
+
+
+def _resolve_directional_fix(
+    opt_mode: OptMode,
+    fix_width: Decimal | None,
+    fix_height: Decimal | None,
+) -> tuple[OptMode, list[int | Decimal] | None]:
+    """Resolve ``--optimise`` plus ``--fix-*`` into a mode and DIE_AREA override.
+
+    A fixed axis pins one side and minimises the other: ``--fix-width`` pairs with
+    ``find_min_height`` and ``--fix-height`` with ``find_min_width``. The minimised
+    axis starts square; ``TileOptimisation`` re-seeds it from the synthesised cell
+    area, so only the fixed value needs to be supplied.
+
+    Parameters
+    ----------
+    opt_mode : OptMode
+        The mode requested via ``--optimise``.
+    fix_width : Decimal | None
+        Locked tile width, if ``--fix-width`` was given.
+    fix_height : Decimal | None
+        Locked tile height, if ``--fix-height`` was given.
+
+    Returns
+    -------
+    tuple[OptMode, list[int | Decimal] | None]
+        The resolved optimisation mode and the DIE_AREA override, or ``None`` when
+        neither fix flag is set.
+
+    Raises
+    ------
+    ValueError
+        If both fix flags are given, or a fix flag contradicts ``--optimise``.
+    """
+    if fix_width is not None and fix_height is not None:
+        raise ValueError("Specify only one of --fix-width / --fix-height.")
+    if fix_width is not None:
+        mode = _require_directional_mode(
+            opt_mode, OptMode.FIND_MIN_HEIGHT, "--fix-width"
+        )
+        return mode, [0, 0, fix_width, fix_width]
+    if fix_height is not None:
+        mode = _require_directional_mode(
+            opt_mode, OptMode.FIND_MIN_WIDTH, "--fix-height"
+        )
+        return mode, [0, 0, fix_height, fix_height]
+    return opt_mode, None
 
 
 INTO_STRING = rf"""
@@ -111,8 +211,8 @@ or
 The shell support tab completion for commands and files
 
 To run the complete FABulous flow with the default project, run the following command:
-    run_FABulous_fabric
-    run_FABulous_bitstream ./user_design/sequential_16bit_en.v
+    run_fab
+    compile_design ./user_design/sequential_16bit_en.v
     run_simulation fst ./user_design/sequential_16bit_en.bin
 """
 
@@ -165,6 +265,8 @@ class FABulous_CLI(Cmd):
         If true, run in interactive CLI mode
     max_job : int
         Maximum number of parallel jobs for tile generation
+    do_compile_design : Callable
+        Method to compile user design through synthesis, PnR, and bitstream generation
     filePathOptionalParser : Cmd2ArgumentParser
         Argument parser for commands with an optional file path argument
     filePathRequireParser : Cmd2ArgumentParser
@@ -175,14 +277,16 @@ class FABulous_CLI(Cmd):
         Argument parser for commands accepting a list of tile names
     tile_single_parser : Cmd2ArgumentParser
         Argument parser for commands accepting a single tile name
+    clone_tile_parser : Cmd2ArgumentParser
+        Argument parser for the clone_tile command
     install_oss_cad_suite_parser : Cmd2ArgumentParser
         Argument parser for the install-oss-cad-suite command
     install_FABulator_parser : Cmd2ArgumentParser
         Argument parser for the install-FABulator command
     geometryParser : Cmd2ArgumentParser
         Argument parser for the gen_geometry command
-    simulation_parser : Cmd2ArgumentParser
-        Argument parser for the run_simulation command
+    do_run_simulation : Callable
+        Method to run simulation of a compiled user design
     gen_tile_parser : Cmd2ArgumentParser
         Argument parser for the gen_tile command
     gds_parser : Cmd2ArgumentParser
@@ -191,8 +295,12 @@ class FABulous_CLI(Cmd):
         Argument parser for the gen_io_pin_config command
     gen_all_tile_parser : Cmd2ArgumentParser
         Argument parser for the gen_all_tile command
+    eFPGA_macro_parser: Cmd2ArgumentParser
+        Argument parser for the gen_eFPGA_macro command
     gui_parser : Cmd2ArgumentParser
         Argument parser for the open_gui command
+    timing_model_parser : Cmd2ArgumentParser
+        Argument parser for the timing_model command
 
     Notes
     -----
@@ -309,7 +417,7 @@ class FABulous_CLI(Cmd):
             "User Design Flow commands are disabled until fabric is loaded",
         )
         self.disable_category(
-            CMD_GUI, "GUI commands are disabled until gen_gen_geometry is run"
+            CMD_GUI, "GUI commands are disabled until gen_geometry is run"
         )
         self.disable_category(
             CMD_HELPER, "Helper commands are disabled until fabric is loaded"
@@ -343,10 +451,102 @@ class FABulous_CLI(Cmd):
         """Exit the FABulous shell and log info message."""
         self.onecmd_plus_hooks("exit")
 
-    # Import do_synthesis from cmd_synthesis
+    # Legacy synthesis parser — kept for backwards compatibility with existing
+    # scripts that pass flags like -extra-plib, -nofsm, etc. directly.
+    _synthesis_parser = Cmd2ArgumentParser(
+        description="[DEPRECATED] Use 'compile_design --synth-only' instead."
+    )
+    _synthesis_parser.add_argument(
+        "files",
+        type=Path,
+        nargs="+",
+        completer=Cmd.path_complete,
+    )
+    _synthesis_parser.add_argument("-top", type=str, default="top_wrapper")
+    _synthesis_parser.add_argument("-auto-top", action="store_true")
+    _synthesis_parser.add_argument("-blif", type=Path)
+    _synthesis_parser.add_argument("-edif", type=Path)
+    _synthesis_parser.add_argument("-json", type=Path)
+    _synthesis_parser.add_argument("-lut", type=str, default="4")
+    _synthesis_parser.add_argument("-plib", type=str)
+    _synthesis_parser.add_argument("-extra-plib", type=Path, action="append")
+    _synthesis_parser.add_argument("-extra-map", type=Path, action="append")
+    _synthesis_parser.add_argument("-encfile", type=Path)
+    _synthesis_parser.add_argument("-nofsm", action="store_true")
+    _synthesis_parser.add_argument("-noalumacc", action="store_true")
+    _synthesis_parser.add_argument(
+        "-carry", type=str, default="none", choices=["none", "ha"]
+    )
+    _synthesis_parser.add_argument("-noregfile", action="store_true")
+    _synthesis_parser.add_argument("-iopad", action="store_true")
+    _synthesis_parser.add_argument("-complex-dff", action="store_true")
+    _synthesis_parser.add_argument("-noflatten", action="store_true")
+    _synthesis_parser.add_argument("-nordff", action="store_true")
+    _synthesis_parser.add_argument("-noshare", action="store_true")
+    _synthesis_parser.add_argument("-run", type=str)
+    _synthesis_parser.add_argument("-no-rw-check", action="store_true")
+
+    @with_category(CMD_USER_DESIGN_FLOW)
+    @with_argparser(_synthesis_parser)
     def do_synthesis(self, args: argparse.Namespace) -> None:
-        """Run synthesis on the specified design."""
-        cmd_synthesis.do_synthesis(self, args)
+        """Run Yosys synthesis for the specified Verilog files.
+
+        deprecated: Use ``compile_design --synth-only`` instead.
+        """
+        logger.warning(
+            "The 'synthesis' command is deprecated. Use 'compile_design' instead."
+        )
+
+        # Translate legacy flags into --synth-extra-args for compile_design
+        extra = []
+        if args.blif:
+            extra.append(f"-blif {args.blif}")
+        if args.edif:
+            extra.append(f"-edif {args.edif}")
+        if args.lut:
+            extra.append(f"-lut {args.lut}")
+        if args.plib:
+            extra.append(f"-plib {args.plib}")
+        if args.extra_plib:
+            extra.extend(f"-extra-plib {p}" for p in args.extra_plib)
+        if args.extra_map:
+            extra.extend(f"-extra-map {m}" for m in args.extra_map)
+        if args.encfile:
+            extra.append(f"-encfile {args.encfile}")
+        if args.nofsm:
+            extra.append("-nofsm")
+        if args.noalumacc:
+            extra.append("-noalumacc")
+        if args.carry and args.carry != "none":
+            extra.append(f"-carry {args.carry}")
+        if args.noregfile:
+            extra.append("-noregfile")
+        if args.iopad:
+            extra.append("-iopad")
+        if args.complex_dff:
+            extra.append("-complex-dff")
+        if args.noflatten:
+            extra.append("-noflatten")
+        if args.nordff:
+            extra.append("-nordff")
+        if args.noshare:
+            extra.append("-noshare")
+        if args.run:
+            extra.append(f"-run {args.run}")
+        if args.no_rw_check:
+            extra.append("-no-rw-check")
+
+        cmd = f"compile_design {' '.join(str(f) for f in args.files)} --synth-only"
+        if args.top != "top_wrapper":
+            cmd += f" -top {args.top}"
+        if args.json:
+            cmd += f" -json {args.json}"
+        if extra:
+            cmd += f' --synth-extra-args "{" ".join(extra)}"'
+
+        self.onecmd_plus_hooks(cmd)
+
+    do_compile_design: Callable = cmd_compile_design.do_compile_design
 
     filePathOptionalParser: Cmd2ArgumentParser = Cmd2ArgumentParser()
     filePathOptionalParser.add_argument(
@@ -392,6 +592,24 @@ class FABulous_CLI(Cmd):
         type=str,
         help="A tile",
         completer=lambda self: self.fab.getTiles(),
+    )
+
+    clone_tile_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
+    clone_tile_parser.add_argument(
+        "src_tile",
+        type=str,
+        help="Name of the tile to clone (looked up in Tile/) or path to a tile dir",
+    )
+    clone_tile_parser.add_argument(
+        "dst_tile",
+        type=str,
+        help="Name for the cloned tile (placed in Tile/) or path to destination dir",
+    )
+    clone_tile_parser.add_argument(
+        "--no-register",
+        action="store_true",
+        default=False,
+        help="Skip adding the new tile to fabric.csv",
     )
 
     install_oss_cad_suite_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
@@ -506,6 +724,62 @@ class FABulous_CLI(Cmd):
         self.enable_category(CMD_FABRIC_FLOW)
         self.enable_category(CMD_USER_DESIGN_FLOW)
         logger.info("Complete")
+
+    @with_category(CMD_SETUP)
+    @with_argparser(clone_tile_parser)
+    def do_clone_tile(self, args: argparse.Namespace) -> None:
+        """Clone a tile or supertile directory and register it in fabric.csv.
+
+        Copies the source tile directory to a new destination directory, renaming
+        all files and replacing all internal references to match the new tile name.
+        Also appends the required Tile/Supertile entries to fabric.csv.
+
+        Notes
+        -----
+        Only works correctly for tiles that follow the default FABulous tile
+        naming scheme, where the tile name is used as a prefix for all files
+        and internal references (e.g. `LUT4AB.csv`,
+        `LUT4AB_switch_matrix.list`).
+
+        Parameters
+        ----------
+        args : argparse.Namespace
+            Command arguments containing:
+            - src_tile: Name of the existing tile (looked up in Tile/) or path to
+              a tile directory
+            - dst_tile: Name for the new tile (placed in Tile/) or path to the
+              destination directory
+            - no_register: If True, skip updating fabric.csv
+        """
+        tile_dir = self.projectDir / "Tile"
+        src_dir = resolve_tile(args.src_tile, tile_dir)
+        dst_dir = resolve_tile(args.dst_tile, tile_dir)
+
+        if not src_dir.is_dir():
+            logger.error(f"Tile '{args.src_tile}' not found at {src_dir}")
+            return
+        if not (src_dir / f"{src_dir.name}.csv").exists():
+            logger.error(
+                f"'{args.src_tile}' at {src_dir} is not a valid FABulous tile"
+                f" (missing {src_dir.name}.csv)"
+            )
+            return
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", dst_dir.name):
+            logger.error(
+                f"'{args.dst_tile}' is not a valid tile name"
+                " (must start with a letter, contain only letters, digits, underscores)"
+            )
+            return
+        if dst_dir.exists():
+            logger.error(f"Destination '{args.dst_tile}' already exists at {dst_dir}")
+            return
+
+        clone_tile_directory(src_dir, dst_dir, src_dir.name, dst_dir.name)
+        logger.info(f"Cloned tile '{args.src_tile}' -> '{args.dst_tile}'")
+
+        if not args.no_register:
+            register_tile_in_fabric_csv(self.csvFile, dst_dir)
+            logger.info(f"Updated {self.csvFile} with entries for '{args.dst_tile}'")
 
     @with_category(CMD_HELPER)
     def do_print_bel(self, args: argparse.Namespace) -> None:
@@ -625,6 +899,22 @@ class FABulous_CLI(Cmd):
                     )
                     self.fabulousAPI.genTile(st)
                     logger.info(f"Generated subtile {st}")
+
+                # Gen supertile switch matrix (no-op if no supertile_matrix file)
+                logger.info(f"Generating switch matrix for super tile {t}")
+                self.fabulousAPI.setWriterOutputFile(
+                    f"{self.projectDir}/Tile/{t}/{t}_switch_matrix.{self.extension}"
+                )
+                self.fabulousAPI.gen_super_tile_switch_matrix(t)
+                logger.info(f"Generated switch matrix for super tile {t}")
+
+                # Gen supertile ConfigMem (no-op if no ST config bits)
+                logger.info(f"Generating ConfigMem for super tile {t}")
+                self.fabulousAPI.setWriterOutputFile(
+                    f"{self.projectDir}/Tile/{t}/{t}_ConfigMem.{self.extension}"
+                )
+                self.fabulousAPI.gen_super_tile_config_mem(t)
+                logger.info(f"Generated ConfigMem for super tile {t}")
 
                 # Gen super tile
                 logger.info(f"Generating super tile {t}")
@@ -795,7 +1085,7 @@ class FABulous_CLI(Cmd):
         logger.info("Top wrapper generation complete")
 
     @with_category(CMD_FABRIC_FLOW)
-    def do_run_FABulous_fabric(self, *_ignored: str) -> None:
+    def do_run_fab(self, *_ignored: str) -> None:
         """Generate the fabric based on the CSV file.
 
         Create bitstream specification of the fabric, top wrapper of the fabric, Nextpnr
@@ -816,6 +1106,17 @@ class FABulous_CLI(Cmd):
 
         if success:
             logger.info("FABulous fabric flow complete")
+
+    @with_category(CMD_FABRIC_FLOW)
+    def do_run_FABulous_fabric(self, *_ignored: str) -> None:
+        """Generate the fabric based on the CSV file.
+
+        deprecated: Use ``run_fab`` instead.
+        """
+        logger.warning(
+            "The 'run_FABulous_fabric' command is deprecated. Use 'run_fab' instead."
+        )
+        self.do_run_fab()
 
     @with_category(CMD_FABRIC_FLOW)
     def do_gen_model_npnr(self, *_ignored: str) -> None:
@@ -852,256 +1153,53 @@ class FABulous_CLI(Cmd):
     def do_place_and_route(self, args: argparse.Namespace) -> None:
         """Run place and route with Nextpnr for a given JSON file.
 
-        Generated by Yosys, which requires a Nextpnr model and JSON file first,
-        generated by `synthesis`.
-
-        Also logs place and route error, file not found error and type error.
+        deprecated: Use ``compile_design --pnr-only`` instead.
         """
-        logger.info(
-            f"Running Placement and Routing with Nextpnr for design {args.file}"
+        logger.warning(
+            "The 'place_and_route' command is deprecated. "
+            "Use 'compile_design --pnr-only' instead."
         )
-        path = Path(args.file)
-        parent = path.parent
-        json_file = path.name
-        top_module_name = path.stem
 
+        path = Path(args.file)
         if path.suffix != ".json":
             raise InvalidFileType(
                 "No json file provided. Usage: place_and_route <json_file>"
             )
 
-        fasm_file = top_module_name + ".fasm"
-        log_file = top_module_name + "_npnr_log.txt"
-
-        if parent == "":
-            parent = "."
-
-        if (
-            not Path(f"{self.projectDir}/.FABulous/pips.txt").exists()
-            or not Path(f"{self.projectDir}/.FABulous/bel.txt").exists()
-        ):
-            raise FileNotFoundError(
-                "Pips and Bel files are not found, please run model_gen_npnr first"
-            )
-
-        if Path(f"{self.projectDir}/{parent}").exists():
-            # TODO rewriting the fab_arch script so no need to copy file for work around
-            npnr = get_context().nextpnr_path
-            if f"{json_file}" in [
-                str(i.name) for i in Path(f"{self.projectDir}/{parent}").iterdir()
-            ]:
-                runCmd = [
-                    f"FAB_ROOT={self.projectDir}",
-                    f"{npnr!s}",
-                    "--uarch",
-                    "fabulous",
-                    "--json",
-                    f"{self.projectDir}/{parent}/{json_file}",
-                    "-o",
-                    f"fasm={self.projectDir}/{parent}/{fasm_file}",
-                    "--verbose",
-                    "--log",
-                    f"{self.projectDir}/{parent}/{log_file}",
-                ]
-                result = sp.run(
-                    " ".join(runCmd),
-                    stdout=sys.stdout,
-                    stderr=sp.STDOUT,
-                    check=True,
-                    shell=True,
-                )
-                if result.returncode != 0:
-                    raise CommandError("Nextpnr failed with non-zero exit code")
-
-            else:
-                raise FileNotFoundError(
-                    f'Cannot find file "{json_file}" in path '
-                    f'"{self.projectDir}/{parent}/". '
-                    "This file is generated by running Yosys with Nextpnr backend "
-                    "(e.g. synthesis)."
-                )
-
-            logger.info("Placement and Routing completed")
-        else:
-            raise FileNotFoundError(
-                f"Directory {self.projectDir}/{parent} does not exist. "
-                "Please check the path and try again."
-            )
+        self.onecmd_plus_hooks(f"compile_design {path} --pnr-only")
 
     @with_category(CMD_USER_DESIGN_FLOW)
     @with_argparser(filePathRequireParser)
     def do_gen_bitStream_binary(self, args: argparse.Namespace) -> None:
         """Generate bitstream of a given design.
 
-        Using FASM file and pre-generated bitstream specification file
-        `bitStreamSpec.bin`. Requires bitstream specification before use by running
-        `gen_bitStream_spec` and place and route file generated by running
-        `place_and_route`.
-
-        Also logs output file directory, Bitstream generation error and file not found
-        error.
+        deprecated: Use ``compile_design`` which includes bitstream generation.
         """
-        parent = args.file.parent
-        fasm_file = args.file.name
-        top_module_name = args.file.stem
+        logger.warning(
+            "The 'gen_bitStream_binary' command is deprecated. "
+            "Use 'compile_design' instead, which includes bitstream generation."
+        )
 
         if args.file.suffix != ".fasm":
             raise InvalidFileType(
                 "No fasm file provided. Usage: gen_bitStream_binary <fasm_file>"
             )
 
-        bitstream_file = top_module_name + ".bin"
+        self.onecmd_plus_hooks(f"compile_design {args.file} --bitgen-only")
 
-        if not (self.projectDir / ".FABulous/bitStreamSpec.bin").exists():
-            raise FileNotFoundError(
-                "Cannot find bitStreamSpec.bin file, which is generated by running "
-                "gen_bitStream_spec"
-            )
-
-        if not (self.projectDir / f"{parent}/{fasm_file}").exists():
-            raise FileNotFoundError(
-                f"Cannot find {self.projectDir}/{parent}/{fasm_file} file which is "
-                "generated by running place_and_route. "
-                "Potentially Place and Route Failed."
-            )
-
-        logger.info(f"Generating Bitstream for design {self.projectDir}/{args.file}")
-        logger.info(f"Outputting to {self.projectDir}/{parent}/{bitstream_file}")
-
-        try:
-            genBitstream(
-                f"{self.projectDir}/{parent}/{fasm_file}",
-                f"{self.projectDir}/.FABulous/bitStreamSpec.bin",
-                f"{self.projectDir}/{parent}/{bitstream_file}",
-            )
-
-        except Exception as e:  # noqa: BLE001
-            raise CommandError(
-                f"Bitstream generation failed for "
-                f"{self.projectDir}/{parent}/{fasm_file}. "
-                "Please check the logs for more details."
-            ) from e
-
-        logger.info("Bitstream generated")
-
-    simulation_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
-    simulation_parser.add_argument(
-        "format",
-        choices=["vcd", "fst"],
-        default="fst",
-        help="Output format of the simulation",
-    )
-    simulation_parser.add_argument(
-        "file",
-        type=Path,
-        completer=Cmd.path_complete,
-        help="Path to the bitstream file",
-    )
-    simulation_parser.add_argument(
-        "-d",
-        "--design",
-        default="",
-        help="Design name to simulate (default: inferred from bitstream filename)",
-    )
-    simulation_parser.add_argument(
-        "-if",
-        "--extra-iverilog-flag",
-        default="",
-        help="Extra flags to pass to iverilog (Verilog projects)",
-    )
-    simulation_parser.add_argument(
-        "-gf",
-        "--extra-ghdl-flag",
-        default="",
-        help="Extra flags to pass to GHDL (VHDL projects)",
-    )
-
-    @with_category(CMD_USER_DESIGN_FLOW)
-    @with_argparser(simulation_parser)
-    def do_run_simulation(self, args: argparse.Namespace) -> None:
-        """Simulate given FPGA design.
-
-        Uses Taskfile.yml (preferred) or falls back to Make (deprecated). The
-        bitstream_file argument should be a binary file generated by
-        'gen_bitStream_binary'.
-        """
-        if args.file.is_relative_to(self.projectDir):
-            bitstreamPath = args.file
-        else:
-            bitstreamPath = self.projectDir / args.file
-
-        if bitstreamPath.suffix != ".bin":
-            raise InvalidFileType(
-                "No bitstream file specified. "
-                "Usage: run_simulation <format> <bitstream_file>"
-            )
-
-        if not bitstreamPath.exists():
-            raise FileNotFoundError(
-                f"Cannot find {bitstreamPath} file which is generated by running "
-                "gen_bitStream_binary. Potentially the bitstream generation failed."
-            )
-
-        testPath = self.projectDir / "Test"
-        taskfile = testPath / "Taskfile.yml"
-        makefile = testPath / "Makefile"
-
-        design_name = args.design or bitstreamPath.stem
-
-        # Prepare build directory and convert .bin to .hex for simulation
-        buildDir = testPath / "build"
-        buildDir.mkdir(parents=True, exist_ok=True)
-        hexPath = buildDir / f"{design_name}.hex"
-        make_hex(bitstreamPath, hexPath)
-        logger.info(f"Converted {bitstreamPath} to {hexPath}")
-
-        task_vars = {
-            "WAVEFORM_TYPE": args.format,
-            "DESIGN": design_name,
-            "BITSTREAM_BIN": str(bitstreamPath.resolve()),
-        }
-        if args.extra_iverilog_flag:
-            task_vars["EXTRA_IVERILOG_FLAGS"] = args.extra_iverilog_flag
-        if args.extra_ghdl_flag:
-            task_vars["EXTRA_GHDL_FLAGS"] = args.extra_ghdl_flag
-
-        if taskfile.exists():
-            logger.info(f"Running simulation for {design_name} via Taskfile")
-            run_task(
-                "run-simulation",
-                task_dir=testPath,
-                task_vars=task_vars,
-                verbose=self.verbose or self.debug,
-            )
-        elif makefile.exists():
-            logger.warning(
-                "Taskfile.yml not found, falling back to Makefile. "
-                "Makefiles are deprecated and will be removed in the next release. "
-                "Please migrate to Taskfile.yml."
-            )
-            make_cmd = ["make", "-C", str(testPath), "run_simulation"]
-            if self.verbose or self.debug:
-                logger.info(f"Running command: {' '.join(make_cmd)}")
-            sp.run(make_cmd, check=True)
-        else:
-            raise FileNotFoundError(
-                f"No Taskfile.yml or Makefile found in {testPath}. "
-                "Please ensure the project Test directory is set up correctly."
-            )
-
-        logger.info("Simulation finished")
+    do_run_simulation: Callable = cmd_run_simulation.do_run_simulation
 
     @with_category(CMD_USER_DESIGN_FLOW)
     @with_argparser(filePathRequireParser)
     def do_run_FABulous_bitstream(self, args: argparse.Namespace) -> None:
         """Run FABulous to generate bitstream on a given design.
 
-        Does this by calling synthesis, place and route, bitstream generation functions.
-        Requires Verilog file specified by <top_module_file>.
-
-        Also logs usage error and file not found error.
+        deprecated: Use ``compile_design`` instead.
         """
-        file_path_no_suffix = args.file.parent / args.file.stem
+        logger.warning(
+            "The 'run_FABulous_bitstream' command is deprecated. "
+            "Use 'compile_design' instead."
+        )
 
         if args.file.suffix not in [".v", ".sv"]:
             raise InvalidFileType(
@@ -1109,26 +1207,7 @@ class FABulous_CLI(Cmd):
                 "Usage: run_FABulous_bitstream <top_module_file>"
             )
 
-        json_file_path = file_path_no_suffix.with_suffix(".json")
-        fasm_file_path = file_path_no_suffix.with_suffix(".fasm")
-
-        do_synth_args = str(args.file)
-
-        primsLib = f"{self.projectDir}/user_design/custom_prims.v"
-        if Path(primsLib).exists():
-            do_synth_args += f" -extra-plib {primsLib}"
-        else:
-            logger.info("No external primsLib found.")
-
-        success = (
-            CommandPipeline(self)
-            .add_step(f"synthesis {do_synth_args}")
-            .add_step(f"place_and_route {json_file_path}")
-            .add_step(f"gen_bitStream_binary {fasm_file_path}")
-            .execute()
-        )
-        if success:
-            logger.info("FABulous bitstream generation complete")
+        self.onecmd_plus_hooks(f"compile_design {args.file}")
 
     @with_category(CMD_SCRIPT)
     @with_argparser(filePathRequireParser)
@@ -1292,16 +1371,36 @@ class FABulous_CLI(Cmd):
     gds_parser.add_argument(
         "--optimise",
         "-opt",
-        help="Optimize the GDS layout",
-        default=OptMode.NO_OPT,
         type=OptMode,
-        const=OptMode.BALANCE,
         nargs="?",
+        const=OptMode.BALANCE,
+        default=OptMode.NO_OPT,
+        help="Optimize the GDS layout. Available modes: "
+        + ", ".join(m.value for m in OptMode),
     )
     gds_parser.add_argument(
         "--override",
-        help="Optimize the GDS layout",
+        help="Override config with a custom YAML config file",
         type=Path,
+    )
+    gds_parser.add_argument(
+        "--fix-width",
+        type=Decimal,
+        default=None,
+        metavar="WIDTH",
+        help="Lock the tile width to WIDTH and minimise the height "
+        "(implies --optimise find_min_height).",
+    )
+    gds_parser.add_argument(
+        "--fix-height",
+        type=Decimal,
+        default=None,
+        metavar="HEIGHT",
+        help="Lock the tile height to HEIGHT and minimise the width "
+        "(implies --optimise find_min_width).",
+    )
+    gds_parser.add_argument(
+        "--io-pin-config", help="Path to a custom IO pin config YAML file", type=Path
     )
 
     io_pin_config_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
@@ -1367,6 +1466,21 @@ class FABulous_CLI(Cmd):
             )
             return
 
+        try:
+            opt_mode, die_area_override = _resolve_directional_fix(
+                args.optimise, args.fix_width, args.fix_height
+            )
+        except ValueError as exc:
+            logger.error(str(exc))
+            return
+
+        custom_overrides: dict = {}
+        if args.override:
+            custom_overrides.update(yaml.safe_load(args.override.read_text()) or {})
+        if die_area_override is not None:
+            custom_overrides["FABULOUS_OPT_MODE"] = opt_mode
+            custom_overrides["DIE_AREA"] = die_area_override
+
         tile_dir = self.projectDir / "Tile" / args.tile
         pin_order_file = tile_dir / f"{args.tile}_io_pin_order.yaml"
 
@@ -1374,14 +1488,17 @@ class FABulous_CLI(Cmd):
             logger.error(f"Tile directory {tile_dir} does not exist")
             return
 
-        if tile := self.fabulousAPI.getTile(args.tile):
-            self.fabulousAPI.gen_io_pin_order_config(tile, pin_order_file)
+        if not args.io_pin_config:
+            if tile := self.fabulousAPI.getTile(args.tile):
+                self.fabulousAPI.gen_io_pin_order_config(tile, pin_order_file)
+            else:
+                super_tile = self.fabulousAPI.getSuperTile(args.tile)
+                if super_tile is None:
+                    logger.error(f"Tile {args.tile} not found in fabric definition")
+                    return
+                self.fabulousAPI.gen_io_pin_order_config(super_tile, pin_order_file)
         else:
-            super_tile = self.fabulousAPI.getSuperTile(args.tile)
-            if super_tile is None:
-                logger.error(f"Tile {args.tile} not found in fabric definition")
-                return
-            self.fabulousAPI.gen_io_pin_order_config(super_tile, pin_order_file)
+            pin_order_file = args.io_pin_config.resolve()
 
         self.fabulousAPI.genTileMacro(
             tile_dir,
@@ -1389,9 +1506,10 @@ class FABulous_CLI(Cmd):
             tile_dir / "macro",
             cast("str", get_context().pdk),
             cast("Path", get_context().pdk_root),
-            optimisation=args.optimise,
+            optimisation=opt_mode,
             base_config_path=self.projectDir / "Tile" / "include" / "gds_config.yaml",
             config_override_path=tile_dir / "gds_config.yaml",
+            custom_config_overrides=custom_overrides or None,
         )
 
     gen_all_tile_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
@@ -1405,11 +1523,12 @@ class FABulous_CLI(Cmd):
     gen_all_tile_parser.add_argument(
         "--optimise",
         "-opt",
-        help="Optimize the GDS layout of all tiles",
-        default=OptMode.NO_OPT,
         type=OptMode,
-        const=OptMode.BALANCE,
         nargs="?",
+        const=OptMode.BALANCE,
+        default=None,
+        help="Optimize the GDS layout of all tiles. Available modes: "
+        + ", ".join(m.value for m in OptMode),
     )
 
     @with_argparser(gen_all_tile_parser)
@@ -1459,15 +1578,37 @@ class FABulous_CLI(Cmd):
         (self.projectDir / "Fabric" / "macro").mkdir(exist_ok=True)
         self.fabulousAPI.fabric_stitching(
             tile_macro_paths,
-            self.projectDir / "Fabric" / f"{self.fabulousAPI.fabric.name}.v",
+            self.projectDir
+            / "Fabric"
+            / f"{self.fabulousAPI.fabric.name}.{self.extension}",
             self.projectDir / "Fabric" / "macro",
             cast("str", get_context().pdk),
             cast("Path", get_context().pdk_root),
             base_config_path=self.projectDir / "Fabric" / "gds_config.yaml",
         )
 
+    eFPGA_macro_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
+    eFPGA_macro_parser.add_argument(
+        "--tile-opt-info",
+        type=str,
+        default=None,
+        help="Path to tile optimisation summary JSON to skip Step 1",
+    )
+    eFPGA_macro_parser.add_argument(
+        "--nlp-only",
+        action="store_true",
+        help="Run exploration and NLP only, skip recompilation",
+    )
+    eFPGA_macro_parser.add_argument(
+        "--nlp-area-margin",
+        type=float,
+        default=0.05,
+        help="Area margin for NLP constraint (default: 0.05 = 5%%)",
+    )
+
     @with_category(CMD_FABRIC_FLOW)
-    def do_run_FABulous_eFPGA_macro(self, *_arg: str) -> None:
+    @with_argparser(eFPGA_macro_parser)
+    def do_run_FABulous_eFPGA_macro(self, args: argparse.Namespace) -> None:
         """Run the full FABulous eFPGA macro generation flow."""
         if not is_pdk_config_set():
             logger.error(
@@ -1477,12 +1618,16 @@ class FABulous_CLI(Cmd):
             return
 
         (self.projectDir / "Fabric" / "macro").mkdir(exist_ok=True)
+        tile_opt_config = Path(args.tile_opt_info) if args.tile_opt_info else None
         self.fabulousAPI.full_fabric_automation(
             self.projectDir,
             self.projectDir / "Fabric" / "macro",
             cast("str", get_context().pdk),
             cast("Path", get_context().pdk_root),
             base_config_path=self.projectDir / "Fabric" / "gds_config.yaml",
+            tile_opt_config=tile_opt_config,
+            nlp_only=args.nlp_only,
+            nlp_area_margin=args.nlp_area_margin,
         )
 
     gui_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
@@ -1535,13 +1680,16 @@ class FABulous_CLI(Cmd):
             script_file.write(f"read_db {db_file}\n")
             file_name = script_file.name
         logger.info(f"Start OpenROAD GUI with odb: {db_file}")
-        sp.run(
-            [
-                str(openroad),
-                "-gui",
-                str(file_name),
-            ]
-        )
+        try:
+            sp.run(
+                [
+                    str(openroad),
+                    "-gui",
+                    str(file_name),
+                ]
+            )
+        finally:
+            Path(file_name).unlink(missing_ok=True)
 
     @with_argparser(gui_parser)
     @with_category(CMD_TOOLS)
@@ -1554,27 +1702,18 @@ class FABulous_CLI(Cmd):
         klayout = get_context().klayout_path
         if args.fabric and args.tile is not None:
             raise CommandError("Please specify either --fabric or --tile, not both")
-
         if args.file is None:
-            gds_file: str = get_file_path(self.projectDir, args, "gds")
+            gds_file: str = get_file_path(
+                self.projectDir, args, "gds", show_count=int(args.head)
+            )
         else:
             gds_file = args.file
-        if get_context().pdk == "ihp-sg13g2":
-            layer_file = (
-                (get_context().pdk_root)
-                / "libs.tech"
-                / "klayout"
-                / "tech"
-                / "sg12g2.lyp"
-            )
-        else:
-            layer_file = (
-                (get_context().pdk_root)
-                / "libs.tech"
-                / "klayout"
-                / "tech"
-                / f"{get_context().pdk}.lyp"
-            )
+        pdk_name = cast("str", get_context().pdk)
+        pdk_root = cast("Path", get_context().pdk_root)
+        layer_file_name = KLAYOUT_LAYER_FILE_NAMES.get(pdk_name, f"{pdk_name}.lyp")
+        layer_file = (
+            pdk_root / pdk_name / "libs.tech" / "klayout" / "tech" / layer_file_name
+        )
         logger.info(f"Start klayout GUI with gds: {gds_file}")
         logger.info(f"Layer property file: {layer_file!s}")
         sp.run(
@@ -1585,3 +1724,123 @@ class FABulous_CLI(Cmd):
                 gds_file,
             ]
         )
+
+    timing_model_parser: Cmd2ArgumentParser = Cmd2ArgumentParser()
+    timing_model_parser.add_argument(
+        "--mode",
+        help="Timing model generation mode (physical or structural).",
+        type=str,
+        choices=["physical", "structural"],
+        default="physical",
+    )
+    timing_model_parser.add_argument(
+        "--outfile",
+        help="Output file for the generated timing model or config template.",
+        type=Path,
+        default=None,
+    )
+    timing_model_parser.add_argument(
+        "--emit-config-template",
+        help="Output file for the generated timing model config template.",
+        default=False,
+        action="store_true",
+    )
+    timing_model_parser.add_argument(
+        "--with-config-file",
+        help="Use a config file for timing model generation instead of CLI arguments.",
+        type=Path,
+        default=None,
+    )
+
+    @with_argparser(timing_model_parser)
+    @with_category(CMD_TIMING_MODEL)
+    def do_timing_model(self, args: argparse.Namespace) -> None:
+        """Generate a timing model for the fabric.
+
+        Timing information is extracted from the GDS layout and used to create a timing
+        model compatible with nextpnr for timing-aware place and route. This command
+        generates a timing model for the FPGA fabric based on the specified mode
+        (physical or structural) and outputs it to a file named pips.txt in the
+        .FABulous directory. If no config file is provided, the automated flow must be
+        run first to generate post-layout files. If a config file is provided, it will
+        be used for timing model generation instead of CLI arguments. This allows for
+        more complex configurations like different PDK support. If emit-config-template
+        is specified, a config template will be output and no timing model will be
+        generated.
+        """
+        outfile: Path | None = None
+        manual_config: TimingModelConfig | None = None
+
+        # Custom output path for the timing model file, if not provided, defaults
+        # to .FABulous/pips.txt with backup of existing file if exists.
+        if args.outfile is not None:
+            outfile: Path = args.outfile
+        else:
+            pips_path = get_context().proj_dir / ".FABulous" / "pips.txt"
+            if pips_path.exists():
+                backup_path = pips_path.with_suffix(".backup.txt")
+                logger.info(f"Backing up existing pips.txt to {backup_path}")
+                pips_path.rename(backup_path)
+            outfile = pips_path
+
+        # If a config file is provided, use it to generate the timing model
+        # instead of CLI arguments This allows for more complex configurations
+        # like supporting different PDKs.
+        if args.with_config_file is not None:
+            config_path = args.with_config_file
+            if not config_path.exists():
+                raise FileNotFoundError(f"Config file {config_path} not found")
+            manual_config = TimingModelConfig.model_validate_json(
+                config_path.read_text()
+            )
+
+        # If emit-config-template is specified, output a config template
+        # and return without generating the timing model.
+        if args.emit_config_template:
+            cfg_template: TimingModelConfig = TimingModelConfig(
+                project_dir=get_context().proj_dir,
+                liberty_files=Path("path/to/liberty/files: <required>"),
+                min_buf_cell_and_ports="cell_name in_port out_port: <required>",
+                synth_executable=get_context().yosys_path,
+                sta_executable=get_context().opensta_path,
+                mode=TimingModelMode(args.mode),
+                custom_per_tile_source_files=dict.fromkeys(
+                    self.allTile,
+                    TimingModelTileSourceFiles(
+                        netlist_file=Path(
+                            "path/to/netlist: <optional, not use project dir files>"
+                        ),
+                        rc_file=Path(
+                            "path/to/rc: <optional, not use project dir files>"
+                        ),
+                        rtl_files=[
+                            Path("path/to/rtl: <optional, not use project dir files>")
+                        ],
+                    ),
+                ),
+            )
+
+            outfile = (
+                get_context().proj_dir
+                / ".FABulous"
+                / "timing_model_config_template.json"
+            )
+            outfile = args.outfile if args.outfile is not None else outfile
+            outfile.write_text(cfg_template.model_dump_json(indent=4))
+            logger.info(f"Timing model config template generated at {outfile}")
+            return
+
+        logger.info(f"Output timing model file: {outfile}")
+
+        tm_config_resolved: TimingModelConfig = self.fabulousAPI.timing_model_interface(
+            mode=args.mode,
+            output_file=outfile,
+            debug=self.debug,
+            manual_config=manual_config,
+        )
+
+        resolved_path: Path = (
+            get_context().proj_dir / ".FABulous" / "timing_model_config_resolved.json"
+        )
+        resolved_path.write_text(tm_config_resolved.model_dump_json(indent=4))
+        logger.info(f"Timing model config resolved at {resolved_path}")

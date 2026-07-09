@@ -81,18 +81,24 @@ class FabricGeometry:
                 tileName = tile.name
                 tileGeom = self.tileGeomMap[tileName]
 
-                if tileGeom == queried:
+                if tileGeom is queried:
                     searchedTile = None
+                    # Pick the in-fabric neighbour on the relevant axis:
+                    # for NORTHSOUTH borders that means the tile above or
+                    # below (whichever is non-NULL); for EASTWEST it's the
+                    # tile to the left or right. T-shaped fabrics can have
+                    # one side be NULL even when i / j is not at the grid
+                    # bounds, so we fall back to the opposite direction.
                     if queried.border == Border.NORTHSOUTH:
-                        if i == 0:
+                        if i + 1 < self.fabric.numberOfRows:
                             searchedTile = self.fabric.tile[i + 1][j]
-                        else:
+                        if searchedTile is None and i - 1 >= 0:
                             searchedTile = self.fabric.tile[i - 1][j]
 
                     elif queried.border == Border.EASTWEST:
-                        if j == 0:
+                        if j + 1 < self.fabric.numberOfColumns:
                             searchedTile = self.fabric.tile[i][j + 1]
-                        else:
+                        if searchedTile is None and j - 1 >= 0:
                             searchedTile = self.fabric.tile[i][j - 1]
 
                     if searchedTile is not None:
@@ -120,8 +126,22 @@ class FabricGeometry:
                         self.tileGeomMap[tile.name] = TileGeometry()
 
                     tileGeom = self.tileGeomMap[tile.name]
-                    northSouth = i == 0 or i + 1 == self.fabric.numberOfRows
-                    eastWest = j == 0 or j + 1 == self.fabric.numberOfColumns
+                    # A tile sits on a north/south border if it is on the
+                    # top/bottom row OR the cell above/below is NULL — the
+                    # latter case lets termination tiles on the inner edge
+                    # of T-shaped fabrics be classified correctly.
+                    northSouth = (
+                        i == 0
+                        or i + 1 == self.fabric.numberOfRows
+                        or self.fabric.tile[i - 1][j] is None
+                        or self.fabric.tile[i + 1][j] is None
+                    )
+                    eastWest = (
+                        j == 0
+                        or j + 1 == self.fabric.numberOfColumns
+                        or self.fabric.tile[i][j - 1] is None
+                        or self.fabric.tile[i][j + 1] is None
+                    )
 
                     if northSouth and eastWest:
                         tileGeom.border = Border.CORNER
@@ -147,10 +167,21 @@ class FabricGeometry:
             else:
                 outerTileNames.append(tileName)
 
+        # A supertile-level BEL is drawn in the supertile's master tile, so map
+        # each master tile name to the supertile BELs it hosts.
+        master_bels: dict[str, list] = {}
+        for superTile in self.fabric.superTileDic.values():
+            mx, my = superTile.get_master_tile_coords()
+            master_tile = superTile.tileMap[my][mx]
+            if master_tile is not None:
+                master_bels.setdefault(master_tile.name, []).extend(superTile.bels)
+
         for tileName in self.tileNames:
             tile = self.fabric.getTileByName(tileName)
             tileGeom = self.tileGeomMap[tileName]
-            tileGeom.generateGeometry(tile, self.padding)
+            tileGeom.generateGeometry(
+                tile, self.padding, extra_bels=master_bels.get(tileName)
+            )
 
         # This step is for figuring out, which tile
         # is the widest/tallest in each column/row

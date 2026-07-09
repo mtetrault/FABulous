@@ -100,6 +100,23 @@
         "url": "https://github.com/ghdl/ghdl/releases/download/v6.0.0/ghdl-mcode-6.0.0-ubuntu24.04-x86_64.tar.gz"
       }
     },
+    "ghdl-yosys-plugin-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1768124497,
+        "narHash": "sha256-LETpUfpIezSxD4A9VYA/OvgN3aZd1YivPe2w973X3nk=",
+        "owner": "ghdl",
+        "repo": "ghdl-yosys-plugin",
+        "rev": "07a30ed39fb6a078f1bf7e9e88ce9ed712380ec2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ghdl",
+        "ref": "ghdl-v6.0.0",
+        "repo": "ghdl-yosys-plugin",
+        "type": "github"
+      }
+    },
     "librelane": {
       "inputs": {
         "ciel": "ciel",
@@ -108,11 +125,11 @@
         "nix-eda": "nix-eda"
       },
       "locked": {
-        "lastModified": 1774611666,
-        "narHash": "sha256-NrfZm7GlFxIEIqaPB2SubKMV7DdqYzRtdRfIePMqwgM=",
+        "lastModified": 1782095523,
+        "narHash": "sha256-xUdRMYrqhEY9B88h4fVp8/xJte31pKFwSAgETqH3UVM=",
         "owner": "librelane",
         "repo": "librelane",
-        "rev": "156f82dadc3ac58d958b6d497e5427a63dd59896",
+        "rev": "da16e8d1641e9ae7eeaf6ee24cb67d5d4ece2a3f",
         "type": "github"
       },
       "original": {
@@ -124,11 +141,11 @@
     "nextpnr-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1774555950,
-        "narHash": "sha256-rtCnmqPG38PZQVa0bVMpDCGxKxMaygdcx+/LeAZwJbM=",
+        "lastModified": 1781853188,
+        "narHash": "sha256-NOAj3/OCmybEnbhdL+pzVD/JBmnXZ0UyqVaEc4q6R0A=",
         "owner": "YosysHQ",
         "repo": "nextpnr",
-        "rev": "77ccf518d5201c21bb687e8d08cadb5cbce1382b",
+        "rev": "2b560ad0ccc6e7e93ad8bd6cb0f88f925bbb314b",
         "type": "github"
       },
       "original": {
@@ -185,11 +202,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1773870109,
-        "narHash": "sha256-ZoTdqZP03DcdoyxvpFHCAek4bkPUTUPUF3oCCgc3dP4=",
+        "lastModified": 1782093830,
+        "narHash": "sha256-6gmEVe69+KlRkZD4PEEV5xAlB9CB0Y9TiuEgQjDrKTQ=",
         "owner": "pyproject-nix",
         "repo": "build-system-pkgs",
-        "rev": "b6e74f433b02fa4b8a7965ee24680f4867e2926f",
+        "rev": "430680a19bc85a3bda55f12e4cc1a1aadcf2e478",
         "type": "github"
       },
       "original": {
@@ -205,11 +222,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1774498001,
-        "narHash": "sha256-wTfdyzzrmpuqt4TQQNqilF91v0m5Mh1stNy9h7a/WK4=",
+        "lastModified": 1780416763,
+        "narHash": "sha256-rRK3IFixgsrK6S3e14Xz9HAZm7+kMAIl3oi5zZlcwYI=",
         "owner": "pyproject-nix",
         "repo": "pyproject.nix",
-        "rev": "794afa6eb588b498344f2eaa36ab1ceb7e6b0b09",
+        "rev": "ad83f1ead0e78e57b188f35cb57298affb06fc5f",
         "type": "github"
       },
       "original": {
@@ -223,6 +240,7 @@
         "fabulator-src": "fabulator-src",
         "ghdl-bin-aarch64-darwin": "ghdl-bin-aarch64-darwin",
         "ghdl-bin-x86_64-linux": "ghdl-bin-x86_64-linux",
+        "ghdl-yosys-plugin-src": "ghdl-yosys-plugin-src",
         "librelane": "librelane",
         "nextpnr-src": "nextpnr-src",
         "nix-eda": [
@@ -250,11 +268,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1774929536,
-        "narHash": "sha256-dMTjy8hu4XFAdNHdcLtCryN3SHqSUFHHqDLep+3b2v4=",
+        "lastModified": 1782100052,
+        "narHash": "sha256-UfyLY3Hfwb3JqxCcj0953GxTFI5dEL85EKEe6DAFiVs=",
         "owner": "pyproject-nix",
         "repo": "uv2nix",
-        "rev": "5d0e883867b1cf53263fcf1bfd34542d40abf5a9",
+        "rev": "920fc6dfaf9f10ec56de93b184055e1a9f380d5e",
         "type": "github"
       },
       "original": {
@@ -266,11 +284,11 @@
     "yosys-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1774954179,
-        "narHash": "sha256-4oJ8UlW9pzEFr/Y4QepzD/FZb7DEEKUjpXyKP/8oF58=",
+        "lastModified": 1780921287,
+        "narHash": "sha256-PHevZAdqVpIPqLklu/8CCwkumipXfPjsVxcazWgmwGI=",
         "ref": "refs/heads/main",
-        "rev": "cede13a742854cd8f2eee6e4e836d51c15abd2c3",
-        "revCount": 16895,
+        "rev": "b4c7a9b40a9c8a1f2031a6090b988a559565c69a",
+        "revCount": 17258,
         "submodules": true,
         "type": "git",
         "url": "https://github.com/YosysHQ/yosys"
