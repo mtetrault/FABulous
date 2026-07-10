@@ -795,7 +795,7 @@ class FABulous_API:
             ]
             if i is not None
         ]
-        flow = SelectFlow(FABulousFabricMacroFullFlow)(
+        flow = SelectFlow(FABulousFabricOptimisationFlow)(
             configs,
             name=self.fabric.name,
             design_dir=str(out_folder.resolve()),
