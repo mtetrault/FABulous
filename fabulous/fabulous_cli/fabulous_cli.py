@@ -1521,6 +1521,14 @@ class FABulous_CLI(Cmd):
         action="store_true",
     )
     gen_all_tile_parser.add_argument(
+        "--jobs",
+        "-j",
+        type=int,
+        help="number of parallel processes",
+        choices=range(1, 12),
+        default=4,
+    )
+    gen_all_tile_parser.add_argument(
         "--optimise",
         "-opt",
         type=OptMode,
@@ -1546,7 +1554,10 @@ class FABulous_CLI(Cmd):
         if not args.parallel:
             commands.execute()
         else:
+            old_max = self.max_job
+            self.max_job = args.jobs
             commands.execute_parallel()
+            self.max_job = old_max
 
     @with_category(CMD_FABRIC_FLOW)
     def do_gen_fabric_macro(self, *_args: str) -> None:
