@@ -127,6 +127,9 @@ var = [
         default=15,
     ),
 ]
+from fabulous.fabric_generator.gds_generator.steps.round_die_area import (
+    RoundDieArea,
+)
 
 
 @Step.factory.register()
@@ -139,6 +142,7 @@ class TileAreaOptimisation(WhileStep):
     inputs = [DesignFormat.NETLIST]
 
     Steps = [
+        RoundDieArea,
         OpenROAD.Floorplan,
         OpenROAD.DumpRCValues,
         Odb.CheckMacroAntennaProperties,
