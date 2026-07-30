@@ -34,6 +34,15 @@ final: prev: {
       };
   });
 
+  cocotbext-spi = prev.cocotbext-spi.overrideAttrs (old: {
+    nativeBuildInputs =
+      (old.nativeBuildInputs or [ ])
+      ++ final.resolveBuildSystem {
+        setuptools = [ ];
+        wheel = [ ];
+      };
+  });
+
   # Fix file collision between alive-progress and about-time (both provide LICENSE files)
   alive-progress = prev.alive-progress.overrideAttrs (old: {
     postInstall = (old.postInstall or "") + ''

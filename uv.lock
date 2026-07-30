@@ -386,6 +386,14 @@ wheels = [
 ]
 
 [[package]]
+name = "cocotbext-spi"
+version = "0.5.1.dev8+g67857d0c7"
+source = { git = "https://github.com/schang412/cocotbext-spi#67857d0c7b9ea854467b57269becb9b221d9986e" }
+dependencies = [
+    { name = "cocotb" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -662,6 +670,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "cocotb" },
+    { name = "cocotbext-spi" },
     { name = "deptry" },
     { name = "interrogate" },
     { name = "pre-commit" },
@@ -702,6 +711,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "cocotb", specifier = ">=2.0.0" },
+    { name = "cocotbext-spi", git = "https://github.com/schang412/cocotbext-spi" },
     { name = "deptry", specifier = ">=0.20.0" },
     { name = "interrogate", specifier = ">=1.7.0" },
     { name = "pre-commit", specifier = ">=4.2.0" },
