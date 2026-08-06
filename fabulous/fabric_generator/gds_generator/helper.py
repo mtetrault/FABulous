@@ -6,8 +6,10 @@ This module exposes utilities used by the GDS generator flows.
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from librelane.config.config import Config
+from librelane.flows.sequential import Substitution, SubstitutionsObject
 from librelane.logging.logger import info
 
 
@@ -174,3 +176,41 @@ def get_routing_obstructions(
             result.append((layer, *box))
 
     return result
+
+
+def merge_layered_substitutions(
+    config_sources: list[Any],
+) -> SubstitutionsObject | None:
+    """Merge `meta.substituting_steps` across layered config sources.
+
+    `Config.load()` overwrites `Config.meta` wholesale for each source in its
+    configs list rather than merging, so a later source with no `meta:` key
+    (e.g. a tile-specific override dict) silently drops an earlier source's
+    `substituting_steps`. This walks the same sources ourselves, in the same
+    order, and concatenates each source's own substitutions so a later
+    source's entries still apply after an earlier source's.
+    """
+    merged: list[tuple[str, Substitution]] = []
+    for source in config_sources:
+        if source is None:
+            continue
+        if isinstance(source, Path | str):
+            if not Path(source).exists():
+                # A missing base/override config file is tolerated elsewhere
+                # in this flow (Config.load treats it as contributing
+                # nothing), so mirror that here instead of letting
+                # Config.get_meta's open() raise on a path that legitimately
+                # may not exist.
+                continue
+            # Config.get_meta only special-cases `str`, not other PathLikes.
+            source = str(source)
+        meta = Config.get_meta(source)
+        if not meta.substituting_steps:
+            continue
+        items = (
+            meta.substituting_steps.items()
+            if isinstance(meta.substituting_steps, dict)
+            else meta.substituting_steps
+        )
+        merged.extend(items)
+    return merged or None
