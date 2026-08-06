@@ -168,6 +168,11 @@
           tkinter-pkg = nixpkgs.legacyPackages.${system}.python3Packages.tkinter;
           tkinter-python-path = "${tkinter-pkg}/${nixpkgs.legacyPackages.${system}.python3.sitePackages}";
 
+          # Per-workstation extra plugin PYTHONPATH, populated by
+          # ~/.local/bin/librelane-plugins-pythonpath.sh into
+          # LIBRELANE_EXTRA_PYTHONPATH (see .bashrc). Empty string if unset.
+          extraPluginPythonPath = builtins.getEnv "LIBRELANE_EXTRA_PYTHONPATH";
+
           # Combine all packages: librelane tools (with patched OpenROAD) + our custom tools + uv2nix env
           # Note: We only include virtualenv for Python, not librelane-env, to avoid collisions
           # Filter by platform support: include if no platforms specified or current system matches
@@ -214,7 +219,8 @@
               }
               {
                 name = "NIX_PYTHONPATH";
-                value = "${librelane-python-path}:${tkinter-python-path}";
+                value = "${librelane-python-path}:${tkinter-python-path}"
+                            + lib.optionalString (extraPluginPythonPath != "") ":${extraPluginPythonPath}";
               }
               {
                 name = "PYTHONWARNINGS";
@@ -322,9 +328,9 @@
                 _nix_py="${librelane-python-path}:${tkinter-python-path}"
                 VENV_SITE=$(python -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)
                 if [ -n "$VENV_SITE" ]; then
-                  export PYTHONPATH="$_nix_py:$VENV_SITE:$REPO_ROOT"
+                  export PYTHONPATH="$_nix_py:''${LIBRELANE_EXTRA_PYTHONPATH:+$LIBRELANE_EXTRA_PYTHONPATH:}$VENV_SITE:$REPO_ROOT"
                 else
-                  export PYTHONPATH="$_nix_py:$REPO_ROOT"
+                  export PYTHONPATH="$_nix_py:''${LIBRELANE_EXTRA_PYTHONPATH:+$LIBRELANE_EXTRA_PYTHONPATH:}$REPO_ROOT"
                 fi
 
                 # Prepend nix tool paths LAST so they take precedence
