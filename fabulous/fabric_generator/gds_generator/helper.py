@@ -3,6 +3,7 @@
 This module exposes utilities used by the GDS generator flows.
 """
 
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from decimal import Decimal
@@ -99,8 +100,45 @@ def lcm_decimal(values: Iterable[Decimal]) -> Decimal:
     return Decimal(numerator) / Decimal(denominator)
 
 
+def get_site_size(config: Config) -> tuple[Decimal, Decimal]:
+    """Return the (width, height) of ``PLACE_SITE``, read out of the LEFs.
+
+    FABulous.ExtractPDKInfo publishes the same two numbers as metrics via ODB, but a
+    flow's ``run`` needs them before any step has executed, and librelane removed the
+    PLACE_SITE_WIDTH / PLACE_SITE_HEIGHT variables that used to carry them, so the
+    site block is parsed straight out of the LEF here.
+    """
+    site = config["PLACE_SITE"]
+    candidates: list[str] = [
+        str(path) for path in (config.get("TECH_LEFS") or {}).values()
+    ]
+    candidates += [str(path) for path in (config.get("CELL_LEFS") or [])]
+
+    block = re.compile(
+        rf"^\s*SITE\s+{re.escape(site)}\s*$(.*?)^\s*END\s+{re.escape(site)}\b",
+        re.MULTILINE | re.DOTALL,
+    )
+    size = re.compile(r"^\s*SIZE\s+([\d.]+)\s+BY\s+([\d.]+)\s*;", re.MULTILINE)
+
+    seen: set[str] = set()
+    for lef in candidates:
+        if lef in seen or not Path(lef).is_file():
+            continue
+        seen.add(lef)
+        if (found := block.search(Path(lef).read_text())) and (
+            dims := size.search(found.group(1))
+        ):
+            return Decimal(dims.group(1)), Decimal(dims.group(2))
+
+    raise ValueError(
+        f"Placement site '{site}' has no SITE block in TECH_LEFS or CELL_LEFS."
+    )
+
+
 def get_abutment_quantum(
-    config: Config, site_width: Decimal, site_height: Decimal
+    config: Config,
+    site_width: Decimal | None = None,
+    site_height: Decimal | None = None,
 ) -> tuple[Decimal, Decimal]:
     """Return the (x, y) die-dimension quanta that keep abutted tiles aligned.
 
@@ -115,10 +153,15 @@ def get_abutment_quantum(
     - twice the site height, because VDD/VSS rail polarity alternates row by row and
       therefore only repeats every second row.
 
+    The site dimensions default to whatever ``PLACE_SITE`` measures in the LEFs;
+    pass them explicitly where a step already has them from the metrics.
+
     Upper metals with a much coarser pitch are deliberately left out. Folding an
     sg13g2 TopMetal1 (2.28) in raises the y quantum from 7.56 to 143.64, inflating
     every tile by tens of microns for a layer that carries no inter-tile signal.
     """
+    if site_width is None or site_height is None:
+        site_width, site_height = get_site_size(config)
     x_pitch, y_pitch = get_pitch(config)
     return (
         lcm_decimal([x_pitch, site_width]),

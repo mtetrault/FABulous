@@ -14,6 +14,7 @@ from fabulous.fabric_generator.gds_generator.helper import (
     get_layer_info,
     get_pitch,
     get_routing_obstructions,
+    get_site_size,
     lcm_decimal,
     round_die_area,
     round_die_dimension,
@@ -363,6 +364,27 @@ class TestGetRoutingObstructions:
             get_routing_obstructions(mock_config)
 
 
+@pytest.fixture
+def sample_cell_lef(tmp_path: Path) -> Path:
+    """Create a LEF carrying a SITE block plus a macro that must not be matched."""
+    lef = tmp_path / "cells.lef"
+    lef.write_text(
+        """VERSION 5.7 ;
+
+SITE  CoreSite
+    CLASS       CORE ;
+    SYMMETRY    Y ;
+    SIZE        0.48 BY 3.78 ;
+END  CoreSite
+
+MACRO some_cell
+  SIZE 3.36 BY 3.78 ;
+END some_cell
+"""
+    )
+    return lef
+
+
 class TestLcmDecimal:
     """Tests for lcm_decimal function."""
 
@@ -456,3 +478,70 @@ class TestGetAbutmentQuantum:
             height = round_die_dimension(Decimal(raw_height), y_quantum, 1)
             assert height >= Decimal(raw_height)
             assert (height / site_height) % 2 == 0
+
+
+class TestGetSiteSize:
+    """Tests for get_site_size function."""
+
+    def test_reads_site_from_cell_lef(
+        self, sample_cell_lef: Path, mock_config: MagicMock
+    ) -> None:
+        """The SITE block, not the first MACRO SIZE, must be returned."""
+        mock_config.__getitem__.side_effect = lambda key: {
+            "PLACE_SITE": "CoreSite"
+        }.get(key)
+        mock_config.get.side_effect = lambda key, default=None: {
+            "TECH_LEFS": {},
+            "CELL_LEFS": [str(sample_cell_lef)],
+        }.get(key, default)
+
+        assert get_site_size(mock_config) == (Decimal("0.48"), Decimal("3.78"))
+
+    def test_skips_missing_lef_paths(
+        self, sample_cell_lef: Path, mock_config: MagicMock, tmp_path: Path
+    ) -> None:
+        """A LEF path that does not exist must not abort the search."""
+        mock_config.__getitem__.side_effect = lambda key: {
+            "PLACE_SITE": "CoreSite"
+        }.get(key)
+        mock_config.get.side_effect = lambda key, default=None: {
+            "TECH_LEFS": {"nom_*": str(tmp_path / "absent.lef")},
+            "CELL_LEFS": [str(sample_cell_lef)],
+        }.get(key, default)
+
+        assert get_site_size(mock_config) == (Decimal("0.48"), Decimal("3.78"))
+
+    def test_raises_when_site_absent(
+        self, sample_cell_lef: Path, mock_config: MagicMock
+    ) -> None:
+        """An unknown site must raise rather than fall through to a wrong number."""
+        mock_config.__getitem__.side_effect = lambda key: {
+            "PLACE_SITE": "NoSuchSite"
+        }.get(key)
+        mock_config.get.side_effect = lambda key, default=None: {
+            "TECH_LEFS": {},
+            "CELL_LEFS": [str(sample_cell_lef)],
+        }.get(key, default)
+
+        with pytest.raises(ValueError, match="NoSuchSite"):
+            get_site_size(mock_config)
+
+    def test_abutment_quantum_falls_back_to_the_lef(
+        self, sample_tracks_file: Path, sample_cell_lef: Path, mock_config: MagicMock
+    ) -> None:
+        """Omitting the site dimensions must derive them from PLACE_SITE."""
+        mock_config.__getitem__.side_effect = lambda key: {
+            "FP_TRACKS_INFO": str(sample_tracks_file),
+            "IO_PIN_V_LAYER": "M1",
+            "IO_PIN_H_LAYER": "M2",
+            "PLACE_SITE": "CoreSite",
+        }.get(key)
+        mock_config.get.side_effect = lambda key, default=None: {
+            "TECH_LEFS": {},
+            "CELL_LEFS": [str(sample_cell_lef)],
+        }.get(key, default)
+
+        from_lef = get_abutment_quantum(mock_config)
+        explicit = get_abutment_quantum(mock_config, Decimal("0.48"), Decimal("3.78"))
+
+        assert from_lef == explicit

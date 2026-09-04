@@ -22,6 +22,7 @@ from fabulous.fabric_generator.gds_generator.flows.flow_define import (
     write_out_steps,
 )
 from fabulous.fabric_generator.gds_generator.helper import (
+    get_abutment_quantum,
     get_pitch,
     merge_layered_substitutions,
     round_up_decimal,
@@ -432,13 +433,13 @@ class FABulousFabricMacroFlow(Classic):
         self,
         fabric: Fabric,
         tile_sizes: dict[str, tuple[Decimal, Decimal]],
-        pitch_x: Decimal,
-        pitch_y: Decimal,
+        quantum_x: Decimal,
+        quantum_y: Decimal,
     ) -> bool:
-        """Validate tile and supertile sizes are aligned to the routing pitch grid.
+        """Validate tile and supertile sizes are aligned to the abutment quantum.
 
-        This checks that each tile's width is a multiple of min_pitch_x and
-        each tile's height is a multiple of min_pitch_y. Also validates supertiles.
+        This checks that each tile's width is a multiple of quantum_x and each tile's
+        height is a multiple of quantum_y. Also validates supertiles.
 
         Parameters
         ----------
@@ -446,10 +447,10 @@ class FABulousFabricMacroFlow(Classic):
             The fabric object with supertile information.
         tile_sizes : dict[str, tuple[Decimal, Decimal]]
             Dictionary mapping tile names to their sizes (width, height).
-        pitch_x : Decimal
-            Pitch for horizontal (X) direction.
-        pitch_y : Decimal
-            Pitch for vertical (Y) direction.
+        quantum_x : Decimal
+            Abutment quantum for the horizontal (X) direction.
+        quantum_y : Decimal
+            Abutment quantum for the vertical (Y) direction.
 
         Returns
         -------
@@ -459,30 +460,30 @@ class FABulousFabricMacroFlow(Classic):
         Raises
         ------
         ValueError
-            If any tile dimensions are not aligned to the pitch grid.
+            If any tile dimensions are not aligned to the abutment quantum.
         """
         tile_size_errors: list[str] = []
 
         def check_multiple(tile_name: str, width: Decimal, height: Decimal) -> None:
-            # Existing pitch alignment check (rounded division -> check fractional part)
-            if pitch_x != 0:
-                width_remainder = str(round(width / pitch_x, 2))[-2:]
+            # Alignment check (rounded division -> check fractional part)
+            if quantum_x != 0:
+                width_remainder = str(round(width / quantum_x, 2))[-2:]
             else:
                 width_remainder = "00"
 
-            if pitch_y != 0:
-                height_remainder = str(round(height / pitch_y, 2))[-2:]
+            if quantum_y != 0:
+                height_remainder = str(round(height / quantum_y, 2))[-2:]
             else:
                 height_remainder = "00"
 
             if width_remainder != "00":
                 tile_size_errors.append(
-                    f"{tile_name}: width {width} not aligned to {pitch_x} "
+                    f"{tile_name}: width {width} not aligned to {quantum_x} "
                     f"(remainder: {width_remainder})"
                 )
             if height_remainder != "00":
                 tile_size_errors.append(
-                    f"{tile_name}: height {height} not aligned to {pitch_y} "
+                    f"{tile_name}: height {height} not aligned to {quantum_y} "
                     f"(remainder: {height_remainder})"
                 )
 
@@ -534,19 +535,23 @@ class FABulousFabricMacroFlow(Classic):
 
         # Get min_pitch_x/min_pitch_y from FP_TRACKS_INFO via helper.get_min_pitch
         pitch_x, pitch_y = get_pitch(self.config)
+        # The halo shifts the whole tile array off the fabric die origin, so it has to
+        # move in whole quanta or the tiles' row and rail grid lands out of phase with
+        # the fabric's own - the pitch alone is too fine to guarantee that.
+        quantum_x, quantum_y = get_abutment_quantum(self.config)
 
         halo_left, halo_bottom, halo_right, halo_top = halo_spacing
-        halo_left = round_up_decimal(halo_left, pitch_x)
-        halo_bottom = round_up_decimal(halo_bottom, pitch_y)
+        halo_left = round_up_decimal(halo_left, quantum_x)
+        halo_bottom = round_up_decimal(halo_bottom, quantum_y)
 
         info(
             f"Rounded placement origin halo: left={halo_left}, bottom={halo_bottom} "
-            f"(min_pitch_x={pitch_x}, min_pitch_y={pitch_y})"
+            f"(quantum_x={quantum_x}, quantum_y={quantum_y})"
         )
 
-        # Validate that all tile sizes are pitch-aligned
-        info("Validating tile sizes are aligned to pitch grid...")
-        self._validate_tile_sizes(self.fabric, self.tile_sizes, pitch_x, pitch_y)
+        # Validate that all tile sizes are abutment-aligned
+        info("Validating tile sizes are aligned to the abutment quantum...")
+        self._validate_tile_sizes(self.fabric, self.tile_sizes, quantum_x, quantum_y)
 
         # Use rounded left/bottom and original right/top for initial calculation
         halo_spacing = (halo_left, halo_bottom, halo_right, halo_top)
@@ -602,8 +607,11 @@ class FABulousFabricMacroFlow(Classic):
         )
 
         tile_spacing_x, tile_spacing_y = tile_spacing
-        tile_spacing_x = round_up_decimal(tile_spacing_x, pitch_x)
-        tile_spacing_y = round_up_decimal(tile_spacing_y, pitch_y)
+        # Quantum, not pitch: a gap between tiles displaces every tile after it, so a
+        # spacing that is not a whole quantum breaks rail polarity across the seam
+        # even when each tile is sized correctly. Zero spacing is unaffected.
+        tile_spacing_x = round_up_decimal(tile_spacing_x, quantum_x)
+        tile_spacing_y = round_up_decimal(tile_spacing_y, quantum_y)
 
         # Place macros
         cur_y = 0
