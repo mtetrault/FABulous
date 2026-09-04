@@ -4,7 +4,10 @@ This module exposes utilities used by the GDS generator flows.
 """
 
 from collections import defaultdict
+from collections.abc import Iterable
 from decimal import Decimal
+from fractions import Fraction
+from math import gcd
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +78,52 @@ def round_up_decimal(value: Decimal, pitch: Decimal) -> Decimal:
     if remainder > 0:
         quotient += 1
     return quotient * pitch
+
+
+def lcm_decimal(values: Iterable[Decimal]) -> Decimal:
+    """Return the least common multiple of a set of exact decimals.
+
+    For fractions ``a/b`` and ``c/d`` the LCM is ``lcm(a, c) / gcd(b, d)``, so the
+    numerators and denominators have to be accumulated separately: letting
+    ``Fraction`` normalise an intermediate result discards the denominator.
+    """
+    numerator, denominator = 1, 0
+    for value in values:
+        fraction = Fraction(value)
+        numerator = numerator * fraction.numerator // gcd(numerator, fraction.numerator)
+        denominator = (
+            gcd(denominator, fraction.denominator)
+            if denominator
+            else fraction.denominator
+        )
+    return Decimal(numerator) / Decimal(denominator)
+
+
+def get_abutment_quantum(
+    config: Config, site_width: Decimal, site_height: Decimal
+) -> tuple[Decimal, Decimal]:
+    """Return the (x, y) die-dimension quanta that keep abutted tiles aligned.
+
+    A tile placed at a cumulative offset carries its whole grid along with it, so
+    every grid a neighbour has to line up with imposes a divisibility constraint on
+    this tile's own width and height:
+
+    - the IO pin layers' track pitch, so pins and signal tracks stay in phase;
+    - the placement site width, so the standard cell rows - and with them the filler
+      cells and the Metal1 followpin rails that only exist inside rows - form one
+      continuous array across an east/west seam;
+    - twice the site height, because VDD/VSS rail polarity alternates row by row and
+      therefore only repeats every second row.
+
+    Upper metals with a much coarser pitch are deliberately left out. Folding an
+    sg13g2 TopMetal1 (2.28) in raises the y quantum from 7.56 to 143.64, inflating
+    every tile by tens of microns for a layer that carries no inter-tile signal.
+    """
+    x_pitch, y_pitch = get_pitch(config)
+    return (
+        lcm_decimal([x_pitch, site_width]),
+        lcm_decimal([y_pitch, 2 * site_height]),
+    )
 
 
 def round_die_dimension(dimension: Decimal, pitch: Decimal, divisions: int) -> Decimal:

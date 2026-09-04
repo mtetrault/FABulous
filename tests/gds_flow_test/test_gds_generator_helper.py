@@ -10,9 +10,11 @@ from librelane.config.config import Config
 from pytest_mock import MockerFixture
 
 from fabulous.fabric_generator.gds_generator.helper import (
+    get_abutment_quantum,
     get_layer_info,
     get_pitch,
     get_routing_obstructions,
+    lcm_decimal,
     round_die_area,
     round_die_dimension,
     round_up_decimal,
@@ -359,3 +361,98 @@ class TestGetRoutingObstructions:
 
         with pytest.raises(ValueError, match="Invalid obstruction"):
             get_routing_obstructions(mock_config)
+
+
+class TestLcmDecimal:
+    """Tests for lcm_decimal function."""
+
+    @pytest.mark.parametrize(
+        ("values", "expected"),
+        [
+            (["0.48", "0.48"], "0.48"),
+            (["0.42", "7.56"], "7.56"),
+            (["0.48", "2.28"], "9.12"),
+            (["0.42", "2.28", "7.56"], "143.64"),
+            (["0.28", "0.56"], "0.56"),
+        ],
+    )
+    def test_lcm_of_exact_decimals(self, values: list[str], expected: str) -> None:
+        """Every input must divide the result exactly."""
+        decimals = [Decimal(v) for v in values]
+        result = lcm_decimal(decimals)
+
+        assert result == Decimal(expected)
+        for value in decimals:
+            assert result % value == 0
+
+    def test_lcm_is_order_independent(self) -> None:
+        """A different argument order must not change the result."""
+        forward = lcm_decimal([Decimal("0.42"), Decimal("2.28"), Decimal("7.56")])
+        reverse = lcm_decimal([Decimal("7.56"), Decimal("2.28"), Decimal("0.42")])
+
+        assert forward == reverse
+
+
+class TestGetAbutmentQuantum:
+    """Tests for get_abutment_quantum function."""
+
+    def test_quantum_covers_pitch_and_site_grid(
+        self, sample_tracks_file: Path, mock_config: MagicMock
+    ) -> None:
+        """The quantum must be divisible by the pitch, the site width and 2 rows."""
+        mock_config.__getitem__.side_effect = lambda key: {
+            "FP_TRACKS_INFO": str(sample_tracks_file),
+            "IO_PIN_V_LAYER": "M1",
+            "IO_PIN_H_LAYER": "M2",
+        }.get(key)
+        site_width = Decimal("0.42")
+        site_height = Decimal("2.8")
+
+        x_quantum, y_quantum = get_abutment_quantum(
+            mock_config, site_width, site_height
+        )
+
+        x_pitch, y_pitch = get_pitch(mock_config)
+        assert x_quantum % x_pitch == 0
+        assert x_quantum % site_width == 0
+        assert y_quantum % y_pitch == 0
+        assert y_quantum % (2 * site_height) == 0
+
+    def test_quantum_collapses_when_site_matches_pitch(
+        self, sample_tracks_file: Path, mock_config: MagicMock
+    ) -> None:
+        """A site width equal to the pitch must not coarsen the x quantum.
+
+        This is the sg13g2 case (0.48 site width, 0.48 Metal X pitch): folding the
+        site grid in must be free on the east/west axis, so tile widths do not grow
+        just because rows are now accounted for.
+        """
+        mock_config.__getitem__.side_effect = lambda key: {
+            "FP_TRACKS_INFO": str(sample_tracks_file),
+            "IO_PIN_V_LAYER": "M1",
+            "IO_PIN_H_LAYER": "M2",
+        }.get(key)
+
+        x_quantum, _ = get_abutment_quantum(
+            mock_config, Decimal("0.28"), Decimal("2.8")
+        )
+
+        assert x_quantum == Decimal("0.28")
+
+    def test_rounded_height_is_an_even_number_of_rows(
+        self, sample_tracks_file: Path, mock_config: MagicMock
+    ) -> None:
+        """Rail polarity repeats every second row, so row count must stay even."""
+        mock_config.__getitem__.side_effect = lambda key: {
+            "FP_TRACKS_INFO": str(sample_tracks_file),
+            "IO_PIN_V_LAYER": "M1",
+            "IO_PIN_H_LAYER": "M2",
+        }.get(key)
+        site_height = Decimal("2.8")
+
+        _, y_quantum = get_abutment_quantum(mock_config, Decimal("0.28"), site_height)
+
+        for raw_height in ("20", "120", "245", "490.14"):
+            height = round_die_dimension(Decimal(raw_height), y_quantum, 1)
+            assert height >= Decimal(raw_height)
+            assert (height / site_height) % 2 == 0

@@ -16,6 +16,7 @@ from librelane.steps import openroad as OpenROAD
 from librelane.steps.step import MetricsUpdate, Step, ViewsUpdate
 
 from fabulous.fabric_generator.gds_generator.helper import (
+    get_abutment_quantum,
     get_pitch,
     get_routing_obstructions,
     round_die_dimension,
@@ -326,12 +327,13 @@ class TileAreaOptimisation(WhileStep):
         )
 
     def pre_iteration_callback(self, pre_iteration: State) -> State:
-        """Pre iteration callback."""
-        if self.config["FABULOUS_OPT_MODE"] == OptMode.NO_OPT:
-            self.config = self.config.copy(DRT_OPT_ITERS=64)
-            self._refresh_routing_obstructions()
-            return pre_iteration
+        """Pre iteration callback.
 
+        The abutment rounding runs before the NO_OPT short circuit: a fixed DIE_AREA
+        still has to land on the quantum, and the site dimensions it needs are only
+        in the metrics once FABulous.ExtractPDKInfo has run, which rules out doing it
+        in the flow constructor alongside `round_die_area`.
+        """
         die_area_raw: tuple[Decimal, Decimal, Decimal, Decimal] = self.config.get(
             "DIE_AREA", None
         )
@@ -342,7 +344,24 @@ class TileAreaOptimisation(WhileStep):
 
         site_width = Decimal(pre_iteration.metrics.get("pdk__site_width", Decimal(1)))
         site_height = Decimal(pre_iteration.metrics.get("pdk__site_height", Decimal(1)))
-        x_pitch, y_pitch = get_pitch(self.config)
+        x_quantum, y_quantum = get_abutment_quantum(
+            self.config, site_width, site_height
+        )
+        logical_w = int(self.config.get("FABULOUS_TILE_LOGICAL_WIDTH", 1))
+        logical_h = int(self.config.get("FABULOUS_TILE_LOGICAL_HEIGHT", 1))
+
+        if self.config["FABULOUS_OPT_MODE"] == OptMode.NO_OPT:
+            self.config = self.config.copy(
+                DRT_OPT_ITERS=64,
+                DIE_AREA=(
+                    Decimal(0),
+                    Decimal(0),
+                    round_die_dimension(width, x_quantum, logical_w),
+                    round_die_dimension(height, y_quantum, logical_h),
+                ),
+            )
+            self._refresh_routing_obstructions()
+            return pre_iteration
 
         width_step = site_width * self.config["FABULOUS_OPTIMISATION_WIDTH_STEP_COUNT"]
         height_step = (
@@ -376,13 +395,11 @@ class TileAreaOptimisation(WhileStep):
                 core_area,
             )
 
-        logical_w = int(self.config.get("FABULOUS_TILE_LOGICAL_WIDTH", 1))
-        logical_h = int(self.config.get("FABULOUS_TILE_LOGICAL_HEIGHT", 1))
         die_area = (
             Decimal(0),
             Decimal(0),
-            round_die_dimension(new_width, x_pitch, logical_w),
-            round_die_dimension(new_height, y_pitch, logical_h),
+            round_die_dimension(new_width, x_quantum, logical_w),
+            round_die_dimension(new_height, y_quantum, logical_h),
         )
         self.config = self.config.copy(
             DRT_OPT_ITERS=self.config["FABULOUS_BASE_OPTIMISATION_ITERATION_START"]
@@ -643,9 +660,11 @@ class TileAreaOptimisation(WhileStep):
                         init_h = pin_h
                         init_w = max(init_w, init_h * logical_w / logical_h)
 
-            x_pitch, y_pitch = get_pitch(self.config)
-            init_w = round_die_dimension(init_w, x_pitch, int(logical_w))
-            init_h = round_die_dimension(init_h, y_pitch, int(logical_h))
+            x_quantum, y_quantum = get_abutment_quantum(
+                self.config, site_width, site_height
+            )
+            init_w = round_die_dimension(init_w, x_quantum, int(logical_w))
+            init_h = round_die_dimension(init_h, y_quantum, int(logical_h))
 
             # Grow per-axis only so a user-locked axis is preserved.
             new_w = max(current_w, init_w)

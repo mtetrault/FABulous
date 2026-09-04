@@ -58,6 +58,69 @@ class TestTileOptimisation:
         step.config = mock_config
         assert step.condition(mock_state) is False
 
+    def test_pre_iteration_callback_rounds_die_area_in_no_opt_mode(
+        self,
+        mocker: MockerFixture,
+        mock_config: Config,
+        mock_state: State,
+    ) -> None:
+        """NO_OPT must still snap a user DIE_AREA onto the abutment quantum.
+
+        NO_OPT does not resize the tile, but an un-snapped die still breaks
+        abutment, so the rounding has to happen ahead of the short circuit.
+        """
+        mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_abutment_quantum",
+            return_value=(Decimal("0.5"), Decimal("2.0")),
+        )
+        mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_routing_obstructions",
+            return_value=[],
+        )
+        mock_config = mock_config.copy(
+            FABULOUS_OPT_MODE=OptMode.NO_OPT,
+            DIE_AREA=(Decimal(0), Decimal(0), Decimal("100.2"), Decimal("201.5")),
+        )
+
+        step = TileAreaOptimisation(mock_config)
+        step.config = mock_config
+        step.iter_count = 0
+        step.pre_iteration_callback(mock_state)
+
+        assert step.config["DIE_AREA"] == (
+            Decimal(0),
+            Decimal(0),
+            Decimal("100.5"),
+            Decimal("202.0"),
+        )
+
+    def test_pre_iteration_callback_keeps_aligned_die_area_in_no_opt_mode(
+        self,
+        mocker: MockerFixture,
+        mock_config: Config,
+        mock_state: State,
+    ) -> None:
+        """An already-aligned DIE_AREA must be left untouched."""
+        mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_abutment_quantum",
+            return_value=(Decimal("0.5"), Decimal("2.0")),
+        )
+        mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_routing_obstructions",
+            return_value=[],
+        )
+        die_area = (Decimal(0), Decimal(0), Decimal("100.5"), Decimal("202.0"))
+        mock_config = mock_config.copy(
+            FABULOUS_OPT_MODE=OptMode.NO_OPT, DIE_AREA=die_area
+        )
+
+        step = TileAreaOptimisation(mock_config)
+        step.config = mock_config
+        step.iter_count = 0
+        step.pre_iteration_callback(mock_state)
+
+        assert step.config["DIE_AREA"] == die_area
+
     def test_pre_iteration_callback_find_min_width_mode(
         self,
         mocker: MockerFixture,
@@ -69,6 +132,10 @@ class TestTileOptimisation:
         # Mock get_pitch to return reasonable pitch values
         mocker.patch(
             "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_pitch",
+            return_value=(Decimal("0.46"), Decimal("2.72")),
+        )
+        mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_abutment_quantum",
             return_value=(Decimal("0.46"), Decimal("2.72")),
         )
         # Mock get_routing_obstructions to avoid config key errors
@@ -190,6 +257,10 @@ class TestSupertileDieAreaGridAlignment:
             return_value=(Decimal("0.5"), Decimal("0.5")),
         )
         mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_abutment_quantum",
+            return_value=(Decimal("0.5"), Decimal("0.5")),
+        )
+        mocker.patch(
             "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_routing_obstructions",
             return_value=[],
         )
@@ -225,6 +296,10 @@ class TestSupertileDieAreaGridAlignment:
         # = 10.2, which the naive rounding pushes to 10.5 (off-grid per division).
         mocker.patch(
             "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_pitch",
+            return_value=(Decimal("0.5"), Decimal("0.5")),
+        )
+        mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_abutment_quantum",
             return_value=(Decimal("0.5"), Decimal("0.5")),
         )
         mocker.patch(
@@ -268,6 +343,10 @@ class TestRunUserFixedSmartInit:
     ) -> TileAreaOptimisation:
         mocker.patch(
             "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_pitch",
+            return_value=(Decimal("0.5"), Decimal("0.5")),
+        )
+        mocker.patch(
+            "fabulous.fabric_generator.gds_generator.steps.tile_area_opt.get_abutment_quantum",
             return_value=(Decimal("0.5"), Decimal("0.5")),
         )
         mocker.patch(
