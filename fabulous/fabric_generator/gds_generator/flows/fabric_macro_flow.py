@@ -27,6 +27,9 @@ from fabulous.fabric_generator.gds_generator.helper import (
     merge_layered_substitutions,
     round_up_decimal,
 )
+from fabulous.fabric_generator.gds_generator.steps.check_power_grid import (
+    CheckPowerGrid,
+)
 from fabulous.fabric_generator.gds_generator.steps.fabric_IO_placement import (
     FABulousFabricIOPlacement,
 )
@@ -44,8 +47,10 @@ subs = {
     "OpenROAD.STAPostPNR*": None,
     # IO placement
     "Odb.CustomIOPlacement": FABulousFabricIOPlacement,
-    # Power
+    # Power. FABulousPDN replaces pdngen entirely, so check_power_grid - which
+    # LibreLane only ever runs from pdn.tcl - has to be added back explicitly.
     "OpenROAD.GeneratePDN": FABulousPDN,
+    "+Odb.FABulousPDN": CheckPowerGrid,
     # Skip cell placement (macro-only fabric has no std cells, and macros
     # fill the die so CutRows produces zero rows; GP/DP would error on that).
     "Odb.ApplyDEFTemplate": None,

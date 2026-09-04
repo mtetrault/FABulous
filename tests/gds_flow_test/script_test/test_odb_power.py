@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from fabulous.fabric_generator.gds_generator.script.odb_power import (
+    merge_touching_rects,
     propagate_supply_net,
 )
 
@@ -508,3 +509,151 @@ def test_power_handles_stacked_metal_layers(
     assert (FakeMetalLayersEnum.METAL1, 0, 0, 10, 10) in coords
     assert (FakeMetalLayersEnum.METAL2, 0, 0, 10, 10) in coords
     assert (FakeMetalLayersEnum.METAL3, 0, 0, 10, 10) in coords
+
+
+class TestMergeTouchingRects:
+    """Tests for merge_touching_rects.
+
+    The geometry below is the real RAM_IO seam: a 0.16 x 0.44 um Metal1 rail stub
+    published flush against each east/west tile edge, so two abutted tiles meet at
+    x = 246.24 um with zero-area contact.
+    """
+
+    TILE_W = 246240
+    STUB = 160
+    RAIL = 440
+    Y0, Y1 = 3560, 4000
+
+    def _east(self, tile: int) -> tuple[str, int, int, int, int]:
+        x = (tile + 1) * self.TILE_W
+        return ("Metal1", x - self.STUB, self.Y0, x, self.Y1)
+
+    def _west(self, tile: int) -> tuple[str, int, int, int, int]:
+        x = tile * self.TILE_W
+        return ("Metal1", x, self.Y0, x + self.STUB, self.Y1)
+
+    def test_edge_touching_stubs_become_one_shape(self) -> None:
+        """The zero-overlap contact between abutted tiles must be coalesced."""
+        merged = merge_touching_rects([self._east(0), self._west(1)])
+
+        assert merged == [
+            (
+                "Metal1",
+                self.TILE_W - self.STUB,
+                self.Y0,
+                self.TILE_W + self.STUB,
+                self.Y1,
+            )
+        ]
+
+    def test_each_seam_merges_independently(self) -> None:
+        """One merged shape per seam, in any input order.
+
+        A tile publishes stubs only at its own edges, never the rail spanning its
+        interior, so the merged result is one shape per seam rather than one shape
+        per row. That is the whole job: bridge the seam with real overlap and leave
+        the tile-internal rail to the macro.
+        """
+        rects = [self._east(0), self._west(1), self._east(1), self._west(2)]
+        merged = sorted(merge_touching_rects(list(reversed(rects))))
+
+        assert merged == [
+            (
+                "Metal1",
+                self.TILE_W - self.STUB,
+                self.Y0,
+                self.TILE_W + self.STUB,
+                self.Y1,
+            ),
+            (
+                "Metal1",
+                2 * self.TILE_W - self.STUB,
+                self.Y0,
+                2 * self.TILE_W + self.STUB,
+                self.Y1,
+            ),
+        ]
+
+    def test_keeps_different_rails_apart(self) -> None:
+        """Stubs on different rails must not be joined across the y gap."""
+        other_rail = (
+            "Metal1",
+            self.TILE_W,
+            self.Y0 + 7560,
+            self.TILE_W + self.STUB,
+            self.Y1 + 7560,
+        )
+        merged = merge_touching_rects([self._east(0), self._west(1), other_rail])
+
+        assert len(merged) == 2
+
+    def test_keeps_layers_apart(self) -> None:
+        """Touching rects on different layers are not connected and must not merge."""
+        _, x0, y0, x1, y1 = self._west(1)
+        merged = merge_touching_rects([self._east(0), ("Metal2", x0, y0, x1, y1)])
+
+        assert len(merged) == 2
+
+    def test_leaves_disjoint_stubs_alone(self) -> None:
+        """A gap in x must survive - merging it would invent a connection."""
+        detached = ("Metal1", self.TILE_W + 1000, self.Y0, self.TILE_W + 1160, self.Y1)
+        merged = merge_touching_rects([self._east(0), detached])
+
+        assert len(merged) == 2
+
+    def test_merges_straps_along_y(self) -> None:
+        """Straps abut north-to-south, so merging must work on that axis too."""
+        lower = ("TopMetal1", 94300, -630, 96500, 250110)
+        upper = ("TopMetal1", 94300, 250110, 96500, 500850)
+
+        assert merge_touching_rects([lower, upper]) == [
+            ("TopMetal1", 94300, -630, 96500, 500850)
+        ]
+
+    def test_absorbs_a_contained_rect(self) -> None:
+        """Overlap, not just abutment, must also coalesce."""
+        big = ("Metal1", 0, self.Y0, 1000, self.Y1)
+        small = ("Metal1", 200, self.Y0, 400, self.Y1)
+
+        assert merge_touching_rects([big, small]) == [big]
+
+    def test_is_idempotent(self) -> None:
+        """Re-merging an already merged set must change nothing."""
+        rects = [self._east(0), self._west(1), self._east(1), self._west(2)]
+        once = merge_touching_rects(rects)
+
+        assert merge_touching_rects(once) == once
+
+    def test_empty_input(self) -> None:
+        """No pins is not an error."""
+        assert merge_touching_rects([]) == []
+
+
+def test_power_merges_abutted_tile_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end: two abutted instances must yield one merged SBox and BBox."""
+    recorder = GeometryRecorder()
+    fake_odb = make_fake_odb_with_geometry(recorder)
+    monkeypatch.setitem(sys.modules, "odb", fake_odb)
+
+    # A tile 1000 wide publishing a rail stub flush against each vertical edge.
+    stubs = [FakeGeometry(0, 100, 40, 140), FakeGeometry(960, 100, 1000, 140)]
+    mterm = FakeMTerm("VPWR", [FakeMPin(stubs)], "POWER")
+    master = FakeMaster([mterm])
+    reader = FakeReader(
+        [FakeInst("tile_0", (0, 0), master), FakeInst("tile_1", (1000, 0), master)]
+    )
+
+    propagate_supply_net(fake_odb, reader, supply_name="VPWR", supply_type="POWER")
+
+    boxes = sorted(box[1:] for box in recorder.sboxes if box[0] == "VPWR")
+    assert boxes == [
+        # outer west edge of the array - nothing to abut
+        (FakeMetalLayersEnum.METAL1, 0, 100, 40, 140),
+        # the seam: tile_0's east stub and tile_1's west stub, now one shape
+        (FakeMetalLayersEnum.METAL1, 960, 100, 1040, 140),
+        # outer east edge of the array
+        (FakeMetalLayersEnum.METAL1, 1960, 100, 2000, 140),
+    ], "the seam pair should coalesce; the two outer stubs should be left alone"
+    assert sorted(box[1:] for box in recorder.bboxes if box[0] == "VPWR") == boxes, (
+        "the top-level pin must carry the same merged geometry"
+    )
