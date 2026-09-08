@@ -155,7 +155,19 @@ def generateBitstreamSpec(fabric: Fabric) -> dict[str, dict]:
             if tile.matrixDir.suffix == ".list":
                 tile.matrixDir = tile.matrixDir.with_suffix(".csv")
 
-            result = parseMatrix(tile.matrixDir, tile.name)
+            if tile.matrixDir.suffix in (".v", ".sv", ".vhdl", ".vhd"):
+                # Hand-written switch matrix HDL: nothing to parse, and no
+                # PIPs to contribute. genTileSwitchMatrix() returns early for
+                # the same suffixes; without this the HDL is read as a switch
+                # matrix CSV and parseMatrix fails on its first line.
+                #
+                # A tile with no routing wires cannot supply a real matrix
+                # instead: an empty .csv or .list leaves the switch matrix
+                # module with no ports, and the Verilog writer cannot close an
+                # empty port list.
+                result = {}
+            else:
+                result = parseMatrix(tile.matrixDir, tile.name)
             for source, sinkList in result.items():
                 controlWidth = 0
                 for i, sink in enumerate(reversed(sinkList)):
