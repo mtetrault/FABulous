@@ -86,6 +86,11 @@ def genNextpnrModel(
                     pipStr.append(
                         f"X{x}Y{y},{sink},X{x}Y{y},{source},{delay},{sink}.{source}"
                     )
+            elif tile.matrixDir.suffix in (".v", ".sv", ".vhdl"):
+                # Hand-written switch matrix HDL: its connectivity is not
+                # machine-readable, so the tile contributes no internal pips.
+                # genTileSwitchMatrix() skips generation for the same suffixes.
+                pass
             else:
                 raise InvalidFileType(
                     f"File {tile.matrixDir} is not a .csv or .list file"
