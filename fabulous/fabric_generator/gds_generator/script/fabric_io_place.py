@@ -15,7 +15,18 @@ BTerm from geometry alone:
   router fans it out to every sink.
 - A multi-fanout net on an abutted (gap 0) side has nowhere to route, so
   placement fails loudly instead of emitting an unroutable design.
+
+The snapped pin can then be moved back inward by a per-side inset. A pin sitting
+on the die edge shares that edge with whatever the fabric puts in the halo band:
+with the core opened out to the die boundary, the band carries standard cell rows,
+their rails, and the via stacks that tie those rails to the mesh. A pin in the way
+of a via site blocks it, and the drop to the lowest rail is the one that fails.
+Insetting the pin into the space between two rails clears the via sites without
+giving up the routing channel the halo exists for. Zero on every side, the
+default, leaves placement exactly as described above.
 """
+
+from decimal import Decimal
 
 import click
 import odb  # type: ignore[import]
@@ -59,13 +70,51 @@ def _snap_delta(side: str, iterm: object, die: object) -> tuple[int, int]:
     return die.xMax() - (inst_x + bbox.xMax()), 0
 
 
+def _inset_delta(side: str, insets: dict[str, int]) -> tuple[int, int]:
+    """Return the (dx, dy) that moves a snapped pin inward from the die edge.
+
+    Applied on top of `_snap_delta`, never instead of it, and deliberately not
+    folded into it: the abutted-side check tests whether the snap delta is zero,
+    which is how it recognises a side with no halo. An inset added before that
+    test would make every side look as though it had one.
+    """
+    if side == "SOUTH":
+        return 0, insets["bottom"]
+    if side == "NORTH":
+        return 0, -insets["top"]
+    if side == "WEST":
+        return insets["left"], 0
+    return -insets["right"], 0
+
+
 @click.command()
+@click.option("--inset-left", default="0", help="Inset from the west die edge, um.")
+@click.option("--inset-bottom", default="0", help="Inset from the south die edge, um.")
+@click.option("--inset-right", default="0", help="Inset from the east die edge, um.")
+@click.option("--inset-top", default="0", help="Inset from the north die edge, um.")
 @click_odb
-def io_place(reader: OdbReaderLike) -> None:
+def io_place(
+    reader: OdbReaderLike,
+    inset_left: str = "0",
+    inset_bottom: str = "0",
+    inset_right: str = "0",
+    inset_top: str = "0",
+) -> None:
     """Stamp signal BTerm BPins, snapping to the die edge where a halo exists."""
     stamped = 0
     deleted = 0
     die = reader.block.getDieArea()
+    insets = {
+        side: int(Decimal(value) * Decimal(reader.dbunits))
+        for side, value in (
+            ("left", inset_left),
+            ("bottom", inset_bottom),
+            ("right", inset_right),
+            ("top", inset_top),
+        )
+    }
+    if any(insets.values()):
+        info(f"Insetting snapped pins from the die edge by {insets} (DBU).")
     for bterm in list(reader.block.getBTerms()):
         if bterm.getSigType() in ("POWER", "GROUND"):
             continue
@@ -103,6 +152,9 @@ def io_place(reader: OdbReaderLike) -> None:
                 f"{side} side with no halo, so the net has nowhere to route. Set "
                 "FABULOUS_HALO_SPACING on that side to open a routing channel."
             )
+
+        idx, idy = _inset_delta(side, insets)
+        dx, dy = dx + idx, dy + idy
 
         bpin = odb.dbBPin_create(bterm)
         inst_x, inst_y = anchor.getInst().getLocation()

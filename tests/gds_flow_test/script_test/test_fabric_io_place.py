@@ -10,6 +10,10 @@ The placement rule is decided per BTerm from geometry alone:
   as the clock gets a routing channel.
 - gap == 0 with more than one sink: the net needs a channel that does not
   exist, so placement fails loudly instead of emitting an unroutable design.
+
+A snapped pin can then be inset back off the die edge, per side, to clear the
+via sites of the rails that occupy the halo band once the core reaches the die
+boundary. The inset is applied after the abutted-side test, never before it.
 """
 
 import contextlib
@@ -45,7 +49,11 @@ def _io_place_setup(
     monkeypatch.setattr(fabric_io_place, "odb", mock_odb_io_place)
 
 
-def _call_io_place(reader: MockReaderIoPlace, monkeypatch: pytest.MonkeyPatch) -> None:
+def _call_io_place(
+    reader: MockReaderIoPlace,
+    monkeypatch: pytest.MonkeyPatch,
+    **insets: str,
+) -> None:
     from librelane.scripts.odbpy.reader import OdbReader
 
     from fabulous.fabric_generator.gds_generator.script import fabric_io_place
@@ -60,7 +68,13 @@ def _call_io_place(reader: MockReaderIoPlace, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(OdbReader, "__init__", _init)
     fn = fabric_io_place.io_place
     actual = fn.callback if hasattr(fn, "callback") else fn
-    actual(input_db="x.odb", input_lefs=[], config_path=None, reader=reader)
+    actual(
+        input_db="x.odb",
+        input_lefs=[],
+        config_path=None,
+        reader=reader,
+        **insets,
+    )
 
 
 def _side_geom(side: str, w: int, h: int) -> tuple[int, int, int, int]:
@@ -259,3 +273,78 @@ def test_leaves_existing_bpins_alone(
 
     # Still exactly one BPin, no new one was created.
     assert bterm.getBPins() == [pre_existing]
+
+
+@pytest.mark.usefixtures("_io_place_setup")
+def test_inset_moves_the_snapped_pin_off_the_die_edge(
+    pin_placement_recorder: PinPlacementRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin still snaps, then steps back in by the inset for that side."""
+    iterm = _make_iterm(0, 20, "SOUTH")
+    net = MockNetIoPlace("sig", [iterm])
+    bterm = MockBTermIoPlace("sig", net)
+
+    block = MockBlockIoPlace(MockDie(0, 0, 200, 150), [bterm])
+    reader = MockReaderIoPlace(100.0, MockTechIoPlace(None, None), block)
+
+    _call_io_place(reader, monkeypatch, inset_bottom="0.05")
+
+    # 0.05um at 100 DBU/um is 5 DBU above the snapped position.
+    assert _placements_for(pin_placement_recorder, "sig") == [
+        ("sig", "Metal2", 40, 5, 60, 15)
+    ]
+
+
+@pytest.mark.usefixtures("_io_place_setup")
+def test_each_side_insets_towards_the_die_centre(
+    pin_placement_recorder: PinPlacementRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sign error here would push a pin out of the die instead of into it."""
+    die = MockDie(0, 0, 200, 200)
+    # Tile at (20, 20), so a 20-DBU halo on every side; the pin snaps to the
+    # edge and steps 5 DBU back in. Its other axis keeps the tile's offset.
+    expected = {
+        "SOUTH": ("sig", "Metal2", 60, 5, 80, 15),
+        "NORTH": ("sig", "Metal2", 60, 185, 80, 195),
+        "WEST": ("sig", "Metal2", 5, 60, 15, 80),
+        "EAST": ("sig", "Metal2", 185, 60, 195, 80),
+    }
+    for side, want in expected.items():
+        iterm = _make_iterm(20, 20, side)
+        net = MockNetIoPlace("sig", [iterm])
+        bterm = MockBTermIoPlace("sig", net)
+        reader = MockReaderIoPlace(
+            100.0, MockTechIoPlace(None, None), MockBlockIoPlace(die, [bterm])
+        )
+        recorder_before = len(pin_placement_recorder.placements)
+
+        _call_io_place(
+            reader,
+            monkeypatch,
+            inset_left="0.05",
+            inset_bottom="0.05",
+            inset_right="0.05",
+            inset_top="0.05",
+        )
+
+        assert pin_placement_recorder.placements[recorder_before:] == [want], side
+
+
+@pytest.mark.usefixtures("_io_place_setup")
+def test_an_inset_does_not_hide_an_abutted_multifanout_net(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The abutted-side check must see the snap delta, not the total delta.
+
+    Folding the inset into the snap would make a side with no halo look as
+    though it had one, and the unroutable design would be emitted silently.
+    """
+    iterms = [_make_iterm(0, 0, "SOUTH"), _make_iterm(100, 0, "SOUTH")]
+    net = MockNetIoPlace("clk", iterms)
+    bterm = MockBTermIoPlace("clk", net)
+
+    block = MockBlockIoPlace(MockDie(0, 0, 200, 100), [bterm])
+    reader = MockReaderIoPlace(100.0, MockTechIoPlace(None, None), block)
+
+    with pytest.raises(ValueError, match="nowhere to route"):
+        _call_io_place(reader, monkeypatch, inset_bottom="0.05")
