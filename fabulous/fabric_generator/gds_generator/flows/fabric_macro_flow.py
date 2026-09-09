@@ -23,7 +23,6 @@ from fabulous.fabric_generator.gds_generator.flows.flow_define import (
 )
 from fabulous.fabric_generator.gds_generator.helper import (
     get_abutment_quantum,
-    get_pitch,
     merge_layered_substitutions,
     round_up_decimal,
 )
@@ -39,7 +38,15 @@ from fabulous.fabric_generator.gds_generator.steps.odb_connect_pdn import (
 from fabulous.fabulous_settings import get_context
 
 subs = {
-    "OpenROAD.CutRows": None,
+    # OpenROAD.CutRows is deliberately NOT removed. It used to be, on the
+    # grounds that macros fill the die and cutting rows under them leaves
+    # nothing - true of a gapless fabric, but no longer: FABULOUS_HALO_SPACING
+    # opens a channel between tiles and the die rounding leaves a band at the
+    # top and right, and cutting rows is what turns those into rows that
+    # OpenROAD.FillInsertion can put filler and decap into. It needs
+    # FP_MACRO_HORIZONTAL_HALO/FP_MACRO_VERTICAL_HALO at 0, or cut_rows'
+    # default 10um keepout around every macro deletes the very rows it would
+    # otherwise leave.
     "OpenROAD.TapEndcapInsertion": None,
     # Disable STA
     "OpenROAD.STAPrePNR*": None,
@@ -51,8 +58,9 @@ subs = {
     # LibreLane only ever runs from pdn.tcl - has to be added back explicitly.
     "OpenROAD.GeneratePDN": FABulousPDN,
     "+Odb.FABulousPDN": CheckPowerGrid,
-    # Skip cell placement (macro-only fabric has no std cells, and macros
-    # fill the die so CutRows produces zero rows; GP/DP would error on that).
+    # Skip cell placement: the fabric's cells are all macros, placed from the
+    # grid, and the only standard cells are the fill inserted after routing.
+    # GP/DP would error on a design with no placeable instances.
     "Odb.ApplyDEFTemplate": None,
     "OpenROAD.GlobalPlacement": None,
     "Odb.ManualGlobalPlacement": None,
@@ -538,8 +546,6 @@ class FABulousFabricMacroFlow(Classic):
             (hs_raw, hs_raw, hs_raw, hs_raw) if isinstance(hs_raw, Decimal) else hs_raw
         )
 
-        # Get min_pitch_x/min_pitch_y from FP_TRACKS_INFO via helper.get_min_pitch
-        pitch_x, pitch_y = get_pitch(self.config)
         # The halo shifts the whole tile array off the fabric die origin, so it has to
         # move in whole quanta or the tiles' row and rail grid lands out of phase with
         # the fabric's own - the pitch alone is too fine to guarantee that.
@@ -587,9 +593,16 @@ class FABulousFabricMacroFlow(Classic):
         info(f"Computed FABRIC_WIDTH (before rounding): {fabric_width}")
         info(f"Computed FABRIC_HEIGHT (before rounding): {fabric_height}")
 
-        # Round the total fabric dimensions UP to the next pitch multiple
-        fabric_width_rounded = round_up_decimal(fabric_width, pitch_x)
-        fabric_height_rounded = round_up_decimal(fabric_height, pitch_y)
+        # Round the total fabric dimensions UP to the next abutment quantum,
+        # not merely the next pitch. The slack this produces is handed to the
+        # right and top halo below, so a pitch-aligned total leaves those two
+        # bands an arbitrary pitch multiple wide - off the row and rail grid,
+        # unlike the left and bottom halo rounded above. That asymmetry shows
+        # up in a built fabric as a top band holding a different number of rail
+        # rows than the bottom one, and it makes those rows unusable for
+        # filler, whose rails have to meet the tiles'.
+        fabric_width_rounded = round_up_decimal(fabric_width, quantum_x)
+        fabric_height_rounded = round_up_decimal(fabric_height, quantum_y)
 
         # Calculate the adjustment needed and distribute it to the halo
         # Add the extra space to the right and top halo (keeps origin at 0,0)
