@@ -206,3 +206,44 @@ class TestWhileStep:
 
         inner_start.assert_not_called()
         replacement_start.assert_called_once()
+
+    def test_substituted_class_does_not_substitute_again(
+        self,
+        mock_config: Config,
+        mock_state: State,
+        mocker: MockerFixture,
+        tmp_path,  # noqa: ANN001
+    ) -> None:
+        """A flow that pre-applied the substitution leaves nothing for run.
+
+        Applying it a second time would raise, since the loop body no longer
+        holds the step IDs the substitution names.
+        """
+
+        class SubstitutableWhileStep(WhileStep):
+            Steps = [_InnerStep]  # noqa: RUF012
+            outputs = []  # noqa: RUF012
+            max_iterations = 1
+
+        substitutions = {"Test.Inner": _ReplacementStep}
+        config = Config(
+            dict(mock_config, FABULOUS_LOOP_SUBSTITUTE_STEPS=substitutions)
+        )
+        inner_start = mocker.patch.object(_InnerStep, "start")
+        replacement_start = mocker.patch.object(
+            _ReplacementStep, "start", return_value=mock_state
+        )
+
+        mocker.patch.object(Config, "dumps", return_value="{}")
+        mocker.patch("pathlib.Path.write_text")
+
+        step = SubstitutableWhileStep.Substitute(substitutions)(config)
+        step.config = config
+        step.step_dir = str(tmp_path)
+        step.toolbox = mocker.MagicMock()
+        step.name = "SubstitutableWhileStep"
+
+        step.run(mock_state)
+
+        inner_start.assert_not_called()
+        replacement_start.assert_called_once()

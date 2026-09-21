@@ -28,6 +28,10 @@ from fabulous.fabric_generator.gds_generator.helper import (
     merge_layered_substitutions,
     round_die_area,
 )
+from fabulous.fabric_generator.gds_generator.steps.loop_substitution import (
+    read_layered_loop_substitutions,
+    substitute_loop_steps_in_flow,
+)
 from fabulous.fabric_generator.gds_generator.steps.tile_area_opt import OptMode
 from fabulous.fabulous_settings import get_context
 
@@ -77,7 +81,7 @@ class FABulousTileMacroFlow(SequentialFlow):
         design_dir: Path | None = None,  # noqa: ARG004
         **custom_config_overrides: dict,
     ) -> Self:
-        """Apply layered `meta.substituting_steps` before construction.
+        """Apply layered step substitutions before construction.
 
         `Config.load()` overwrites its `meta` per config source instead of
         merging (see `merge_layered_substitutions`), so `substituting_steps`
@@ -85,11 +89,16 @@ class FABulousTileMacroFlow(SequentialFlow):
         `self.config.meta` by the time `__init__` runs. Resolve substitutions
         from the same layered sources here and apply them by constructing an
         instance of a `.Substitute()`-derived subclass instead.
+
+        `FABULOUS_LOOP_SUBSTITUTE_STEPS` is read from those same sources for
+        the same reason it cannot wait for `WhileStep.run`: see
+        `loop_substitution`.
         """
-        substitutions = merge_layered_substitutions(
-            [base_config_path, override_config_path, custom_config_overrides]
-        )
+        sources = [base_config_path, override_config_path, custom_config_overrides]
+        substitutions = merge_layered_substitutions(sources)
         target_cls = cls.Substitute(substitutions) if substitutions else cls
+        if loop_substitutions := read_layered_loop_substitutions(sources):
+            target_cls = substitute_loop_steps_in_flow(target_cls, loop_substitutions)
         return super().__new__(target_cls)  # type: ignore[arg-type]
 
     def __init__(

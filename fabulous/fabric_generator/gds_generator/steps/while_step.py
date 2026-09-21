@@ -8,6 +8,7 @@ from pathlib import Path
 from librelane.common.misc import slugify
 from librelane.config.variable import Variable
 from librelane.flows.flow import FlowProgressBar
+from librelane.flows.sequential import SubstitutionsObject
 from librelane.logging.logger import warn
 from librelane.state.design_format import DesignFormat
 from librelane.state.state import State
@@ -17,7 +18,7 @@ from fabulous.fabric_generator.gds_generator.steps.step_substitution import (
     apply_step_substitutions,
 )
 
-_SUBSTITUTE_STEPS_VAR = Variable(
+SUBSTITUTE_STEPS_VAR = Variable(
     "FABULOUS_LOOP_SUBSTITUTE_STEPS",
     dict,
     "Substitutions to apply to this step's internal loop body, using the same "
@@ -41,6 +42,12 @@ class WhileStep(Step):
     propagate_exceptions: tuple[type[BaseException], ...] = ()
 
     _current_iter_dir: Path | None = None
+
+    _substituted: bool = False
+    """Whether `Substitute` has already applied this class's loop substitutions."""
+
+    _outputs_derived: bool = False
+    """Whether `outputs` was derived from `Steps` rather than declared."""
 
     def __init_subclass__(Self):  # noqa: ANN204, D105
         super().__init_subclass__()
@@ -68,12 +75,45 @@ class WhileStep(Step):
                 else:
                     config_var_dict[cvar.name] = cvar
         Self.inputs = list(input_set)
-        if Self.outputs == NotImplemented:  # Allow for setting explicit outputs
+        Self._outputs_derived = Self.outputs == NotImplemented
+        if Self._outputs_derived:  # Allow for setting explicit outputs
             Self.outputs = list(output_set)
         if Self.config_vars:
             config_var_dict.update({v.name: v for v in Self.config_vars})
-        config_var_dict.setdefault(_SUBSTITUTE_STEPS_VAR.name, _SUBSTITUTE_STEPS_VAR)
+        config_var_dict.setdefault(SUBSTITUTE_STEPS_VAR.name, SUBSTITUTE_STEPS_VAR)
         Self.config_vars = list(config_var_dict.values())
+
+    @classmethod
+    def Substitute(Self, substitutions: SubstitutionsObject) -> type["WhileStep"]:  # noqa: N802, N804
+        """Return a subclass whose loop body has `substitutions` applied.
+
+        `run` can apply `FABULOUS_LOOP_SUBSTITUTE_STEPS` itself, but only once
+        the flow is running, which is too late for configuration: `inputs`,
+        `outputs` and `config_vars` are derived from `Steps` in
+        `__init_subclass__`, so a step substituted at run time never gets its
+        `config_vars` into the flow's variable list, and `Step.__init__`
+        discards every value the composite did not declare (see
+        `Config.with_increment`). Its configuration therefore silently falls
+        back to defaults.
+
+        A flow that resolves the substitutions from its raw configuration
+        before construction and builds itself out of the class this returns
+        declares those variables in time. `run` then skips its own
+        substitution pass, which would otherwise fail on loop-body step IDs
+        that are no longer there.
+
+        The class keeps its name, so step directories, logs and
+        `NotImplementedError` messages are unchanged.
+        """
+        namespace: dict[str, object] = {
+            "Steps": apply_step_substitutions(Self.Steps, substitutions),
+            "_substituted": True,
+            "__module__": Self.__module__,
+            "__qualname__": Self.__qualname__,
+        }
+        if Self._outputs_derived:
+            namespace["outputs"] = NotImplemented
+        return type(Self.__name__, (Self,), namespace)
 
     def condition(self, _state: State) -> bool:
         """Return true if the condition is met and keep the loop going."""
@@ -117,7 +157,9 @@ class WhileStep(Step):
         progress_bar = FlowProgressBar(self.name)
 
         loop_steps = self.Steps
-        if substitutions := self.config.get(_SUBSTITUTE_STEPS_VAR.name):
+        if not self._substituted and (
+            substitutions := self.config.get(SUBSTITUTE_STEPS_VAR.name)
+        ):
             loop_steps = apply_step_substitutions(loop_steps, substitutions)
 
         ordinal_length = len(str(len(loop_steps) - 1))
