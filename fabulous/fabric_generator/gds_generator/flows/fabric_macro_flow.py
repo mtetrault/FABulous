@@ -748,6 +748,12 @@ def _build_macros(
             for corner in spef_root.iterdir():
                 spef_dict[corner.name] = list(corner.glob("*.spef"))
 
+        lib_dict: dict[str, list[Path]] = {}
+        lib_root = tile_macro_path / "lib"
+        if lib_root.is_dir():
+            for corner in lib_root.iterdir():
+                lib_dict[corner.name] = list(corner.glob("*.lib"))
+
         macros[name] = Macro(
             gds=cast("list", list((tile_macro_path / "gds").glob("*.gds"))),
             lef=cast("list", [str(p) for p in (tile_macro_path / "lef").glob("*.lef")]),
@@ -757,6 +763,7 @@ def _build_macros(
                 "list", [str(p) for p in (tile_macro_path / "pnl").glob("*.pnl.v")]
             ),
             spef=spef_dict,
+            lib=lib_dict,
         )
         tile_sizes[name] = (width, height)
 
