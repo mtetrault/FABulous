@@ -3,8 +3,10 @@
 Will be replaced into librelane eventually.
 """
 
+import json
 from pathlib import Path
 
+from librelane import __version__
 from librelane.common.misc import slugify
 from librelane.config.variable import Variable
 from librelane.flows.flow import FlowProgressBar
@@ -212,8 +214,17 @@ class WhileStep(Step):
             progress_bar.end_stage()
         current_state = self.post_loop_callback(current_state)
 
-        # Persist final config — post_loop_callback may have updated it
-        (Path(self.step_dir) / "config.json").write_text(self.config.dumps())
+        # Persist final config — post_loop_callback may have updated it.
+        # meta is rewritten as Step.start does: the flow-level meta carries
+        # step=None, which makes Step.load_finished fail on resume.
+        config_mut = json.loads(self.config.dumps())
+        config_mut["meta"] = {
+            "librelane_version": __version__,
+            "step": self.__class__.get_implementation_id(),
+        }
+        (Path(self.step_dir) / "config.json").write_text(
+            json.dumps(config_mut, indent=4)
+        )
 
         for key in current_state:
             if (

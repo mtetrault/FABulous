@@ -143,6 +143,7 @@ class TestWhileStep:
         """With empty propagate_exceptions, break_on_failure swallows the error."""
 
         class SwallowingWhileStep(WhileStep):
+            id = "Test.While"
             Steps = [_InnerStep]  # noqa: RUF012
             outputs = []  # noqa: RUF012
             propagate_exceptions = ()
@@ -178,6 +179,7 @@ class TestWhileStep:
         """
 
         class SubstitutableWhileStep(WhileStep):
+            id = "Test.While"
             Steps = [_InnerStep]  # noqa: RUF012
             outputs = []  # noqa: RUF012
             max_iterations = 1
@@ -221,6 +223,7 @@ class TestWhileStep:
         """
 
         class SubstitutableWhileStep(WhileStep):
+            id = "Test.While"
             Steps = [_InnerStep]  # noqa: RUF012
             outputs = []  # noqa: RUF012
             max_iterations = 1
@@ -247,3 +250,35 @@ class TestWhileStep:
 
         inner_start.assert_not_called()
         replacement_start.assert_called_once()
+
+    def test_final_config_keeps_step_id(
+        self,
+        mock_config: Config,
+        mock_state: State,
+        mocker: MockerFixture,
+        tmp_path,  # noqa: ANN001
+    ) -> None:
+        """The config.json rewritten after the loop still names the step.
+
+        Resuming a run reloads every finished step from its config.json via
+        ``meta.step``; the flow-level meta has ``step=None``.
+        """
+
+        class LoadableWhileStep(WhileStep):
+            id = "Test.LoadableWhile"
+            Steps = [_InnerStep]  # noqa: RUF012
+            outputs = []  # noqa: RUF012
+            max_iterations = 1
+
+        mocker.patch.object(_InnerStep, "start", return_value=mock_state)
+
+        step = LoadableWhileStep(mock_config)
+        step.config = mock_config
+        step.step_dir = str(tmp_path)
+        step.toolbox = mocker.MagicMock()
+        step.name = "LoadableWhileStep"
+
+        step.run(mock_state)
+
+        step_id, _ = Step.factory.from_step_config(str(tmp_path / "config.json"))
+        assert step_id == "Test.LoadableWhile"
