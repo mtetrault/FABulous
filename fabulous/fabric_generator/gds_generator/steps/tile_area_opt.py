@@ -1,7 +1,7 @@
 """Tile size optimisation step for FABulous fabric generator."""
 
 from decimal import Decimal
-from enum import StrEnum
+from enum import EnumType, StrEnum
 from typing import cast
 
 from librelane.common import GenericImmutableDict
@@ -34,7 +34,27 @@ from fabulous.fabric_generator.gds_generator.steps.timed_detailed_routing import
 from fabulous.fabric_generator.gds_generator.steps.while_step import WhileStep
 
 
-class OptMode(StrEnum):
+class _OptModeType(EnumType):
+    """Let ``OptMode[...]`` accept a member value as well as a member name.
+
+    LibreLane parses enum variables by name, but ``json`` writes a ``StrEnum`` as its
+    value, so every ``config.json``/``resolved.json`` LibreLane dumps holds ``no_opt``
+    where the user config said ``NO_OPT``. Without this, resuming a run fails while
+    reloading the finished ``TileAreaOptimisation`` step.
+    """
+
+    def __getitem__(cls, name: str) -> "OptMode":
+        """Look up by name, falling back to the case-insensitive value lookup."""
+        try:
+            return super().__getitem__(name)
+        except KeyError:
+            try:
+                return cls(name)
+            except ValueError:
+                raise KeyError(name) from None
+
+
+class OptMode(StrEnum, metaclass=_OptModeType):
     """Optimisation modes for tile size finding."""
 
     FIND_MIN_WIDTH = "find_min_width"

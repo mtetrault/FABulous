@@ -3,11 +3,14 @@
 # for testing private methods
 # ruff: noqa: SLF001
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from librelane.common import GenericDict
 from librelane.config.config import Config
+from librelane.config.variable import Variable
 from librelane.flows.flow import FlowException
 from librelane.state.state import State
 from pytest_mock import MockerFixture
@@ -688,3 +691,19 @@ class TestComputeBinarySearchDimensions:
         )
         # (2 + 10) / 2 = 6.
         assert new_w == Decimal(6)
+
+
+@pytest.mark.parametrize("mode", list(OptMode))
+def test_opt_mode_survives_config_json_round_trip(mode: OptMode) -> None:
+    """A dumped FABULOUS_OPT_MODE (the member value) parses back as a variable."""
+    dumped = json.loads(json.dumps({"FABULOUS_OPT_MODE": mode}))
+    var = Variable("FABULOUS_OPT_MODE", OptMode, "")
+    _, value = var.compile(GenericDict(dumped), [])
+    assert value is mode
+
+
+def test_opt_mode_lookup_still_rejects_unknown() -> None:
+    """An unknown mode raises KeyError, which LibreLane turns into InvalidConfig."""
+    assert OptMode["NO_OPT"] is OptMode.NO_OPT
+    with pytest.raises(KeyError):
+        OptMode["not_a_mode"]
