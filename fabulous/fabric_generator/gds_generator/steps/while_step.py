@@ -198,6 +198,10 @@ class WhileStep(Step):
                     if self.raise_on_failure:
                         raise e from None
                     if self.break_on_failure:
+                        warn(
+                            f"Step {step.name} failed with exception {e}, "
+                            "ending this iteration."
+                        )
                         break
 
                     warn(
